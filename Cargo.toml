@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ondris-pow",
+    "crates/ondris-primitives",
+    "crates/ondris-core",
+    "crates/ondris-network",
+    "crates/ondris-wallet",
+    "crates/ondris-node",
+    "crates/ondris-miner",
+]
+
+[workspace.package]
+version = "0.1.0-testnet"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jorysanicet410-sketch/ondris"
+
+[workspace.dependencies]
+blake3 = "1.5"
+rand = "0.8"
+rand_xoshiro = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+thiserror = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+sled = "0.34"
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+argon2 = "0.5"
+aes-gcm = "0.10"
+hex = "0.4"
+rayon = "1.10"
+rpassword = "7"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

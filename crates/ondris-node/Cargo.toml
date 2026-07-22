@@ -1,0 +1,23 @@
+[package]
+name = "ondris-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ondris-node"
+path = "src/main.rs"
+
+[dependencies]
+ondris-core = { path = "../ondris-core" }
+ondris-network = { path = "../ondris-network" }
+ondris-pow = { path = "../ondris-pow" }
+ondris-primitives = { path = "../ondris-primitives" }
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

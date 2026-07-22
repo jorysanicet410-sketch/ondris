@@ -1,0 +1,21 @@
+[package]
+name = "ondris-miner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ondris-miner"
+path = "src/main.rs"
+
+[dependencies]
+ondris-core = { path = "../ondris-core" }
+ondris-pow = { path = "../ondris-pow" }
+ondris-primitives = { path = "../ondris-primitives" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

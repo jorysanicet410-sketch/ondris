@@ -1,0 +1,7 @@
+/target
+**/target
+Cargo.lock.bak
+*.log
+ondris-data/
+*.ondris-wallet.json
+.DS_Store

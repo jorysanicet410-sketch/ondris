@@ -1,0 +1,10 @@
+{
+  "network_name": "ondris-testnet-1",
+  "timestamp": 1753142400,
+  "initial_difficulty": 1000,
+  "initial_reward": 5000000000,
+  "halving_interval": 210000,
+  "target_block_time_secs": 30,
+  "retarget_window": 60,
+  "premine": []
+}
