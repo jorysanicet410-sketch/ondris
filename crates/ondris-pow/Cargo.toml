@@ -7,8 +7,6 @@ license.workspace = true
 [dependencies]
 ondris-primitives = { path = "../ondris-primitives" }
 blake3.workspace = true
-rand_xoshiro = "0.6"
-rand = { workspace = true }
 serde.workspace = true
 
 [dev-dependencies]

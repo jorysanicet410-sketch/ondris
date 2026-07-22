@@ -24,4 +24,3 @@ opencl3.workspace = true
 [dev-dependencies]
 blake3.workspace = true
 rand.workspace = true
-rand_xoshiro = "0.6"

@@ -325,7 +325,7 @@ footer{ border-top:1px solid var(--wire); }
       <a class="btn solid" href="https://github.com/jorysanicet410-sketch/ondris" target="_blank" rel="noopener">Read the source →</a>
       <a class="btn ghost" href="#get-started">Run a node</a>
     </div>
-    <p class="hero-meta">Mainnet target — <strong>25 July 2026</strong>. The algorithm, node, wallet, fork handling and both miners (CPU and GPU) work today; the GPU miner isn't tuned for speed yet, and the independent audit doesn't exist. See exactly what's done in <a href="#status" style="color:var(--text);border-bottom:1px solid var(--wire-strong);text-decoration:none;">Status</a> before you point real hardware at it.</p>
+    <p class="hero-meta">Mainnet target — <strong>25 July 2026</strong>. The algorithm, node, wallet, fork handling and both miners (CPU and GPU) work today; the GPU miner measures ~13M H/s on an RTX 4070 Super, and the independent audit doesn't exist. See exactly what's done in <a href="#status" style="color:var(--text);border-bottom:1px solid var(--wire-strong);text-decoration:none;">Status</a> before you point real hardware at it.</p>
   </div>
   <div class="stat-strip">
     <div class="stat"><span class="stat-label"><span class="live-dot" id="liveDot"></span>Chain height</span><span class="stat-value is-loading" id="statHeight">—</span></div>
@@ -350,8 +350,8 @@ footer{ border-top:1px solid var(--wire); }
       </div>
       <div class="step">
         <span class="step-num">02</span>
-        <h3>Scratchpad mixing</h3>
-        <p>Mining fills a working block of memory with slices of that dataset, then mixes it for eight rounds where each step reads what the last one just wrote. You can't parallelize around that without holding the whole thing in memory at once.</p>
+        <h3>Dataset mixing</h3>
+        <p>Mining reads 64 pseudo-random slices out of that dataset per attempt and folds each one in with a cheap mix step. Every attempt is dominated by real, scattered memory reads across tens of megabytes — not by raw arithmetic a single fast core could win at alone.</p>
       </div>
       <div class="step">
         <span class="step-num">03</span>
@@ -374,7 +374,7 @@ footer{ border-top:1px solid var(--wire); }
         <h3>What the algorithm rewards</h3>
         <ul>
           <li>A wide memory bus moving many gigabytes per second — ordinary on a graphics card.</li>
-          <li>Thousands of threads that can each hold their own slice of the scratchpad.</li>
+          <li>Thousands of threads that can each fire off their own random dataset reads in parallel.</li>
           <li>Hardware you already own and can repurpose the moment you stop mining.</li>
         </ul>
       </div>
@@ -405,7 +405,7 @@ footer{ border-top:1px solid var(--wire); }
           <tr><td>Node — chain + P2P + RPC</td><td><span class="pill good">Functional, testnet only</span></td></tr>
           <tr><td>CLI wallet</td><td><span class="pill good">Functional</span></td></tr>
           <tr><td>Reference CPU miner</td><td><span class="pill good">Functional</span></td></tr>
-          <tr><td>GPU miner — OpenCL</td><td><span class="pill warn">Functional, unoptimized (~CPU-level hashrate so far)</span></td></tr>
+          <tr><td>GPU miner — OpenCL</td><td><span class="pill good">Functional, ~13M H/s on an RTX 4070 Super (~95,000x the CPU miner)</span></td></tr>
           <tr><td>Fork / reorg handling</td><td><span class="pill good">Functional</span></td></tr>
           <tr><td>Independent cryptographic audit</td><td><span class="pill warn">Not done</span></td></tr>
           <tr><td>"Useful compute" layer</td><td><span class="pill off">Research-grade, not implemented</span></td></tr>
@@ -434,7 +434,7 @@ footer{ border-top:1px solid var(--wire); }
 <span class="c-prompt">$ </span><span class="c-cmd">cargo run --release --bin ondris-miner</span> <span class="c-flag">--</span> <span class="c-flag">--node</span> http://127.0.0.1:8080 <span class="c-flag">--address</span> &lt;your-address&gt; <span class="c-flag">--threads</span> 4</code></pre>
       </div>
       <div class="getstarted-note">
-        <p class="prose mute" style="margin-bottom:1.1rem;">Needs Rust (edition 2021, 1.96+). The commands above build every binary, join the public testnet seed, create a wallet with an encrypted keystore, and start mining with all available CPU threads. There's also an OpenCL GPU miner (<code>ondris-miner-gpu</code>) — run its <code>self-test</code> subcommand before pointing it at real hardware; it's correctness-validated but not yet tuned for speed.</p>
+        <p class="prose mute" style="margin-bottom:1.1rem;">Needs Rust (edition 2021, 1.96+). The commands above build every binary, join the public testnet seed, create a wallet with an encrypted keystore, and start mining with all available CPU threads. There's also an OpenCL GPU miner (<code>ondris-miner-gpu</code>) — run its <code>self-test</code> subcommand before pointing it at real hardware; it's correctness-validated and measures ~13M H/s on an RTX 4070 Super.</p>
         <p class="prose mute">Full walkthrough, RPC reference, and known limitations are in the <a href="https://github.com/jorysanicet410-sketch/ondris#readme" target="_blank" rel="noopener">README</a> and <a href="https://github.com/jorysanicet410-sketch/ondris/blob/master/docs/ARCHITECTURE.md" target="_blank" rel="noopener">architecture notes</a>.</p>
       </div>
     </div>

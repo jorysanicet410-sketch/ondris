@@ -5,41 +5,71 @@
 **Unaudited.** This spec and its reference implementation have not yet been
 reviewed by independent cryptographers. Do not trust it with real value
 before an external audit. OndrisHash does not reinvent any cryptographic
-primitive: it combines BLAKE3 (an audited, standardized hash function) and
-a deterministic pseudo-random generator in an original "memory-hard +
-data-dependent memory access" architecture, inspired by the Ethash family
-(per-epoch dataset) and CryptoNight/RandomX (scratchpad mixing). What's new
-here is the **architecture and parameterization**, not the underlying
-cryptographic building blocks.
+primitive: it combines BLAKE3 (an audited, standardized hash function) with
+a non-cryptographic FNV mix in an Ethash-style architecture. What's new
+here is the parameterization and BLAKE3 in place of Keccak — not a new
+cryptographic construction and not a new consensus shape.
+
+## Revision history
+
+**v2 (current).** An Ethash-style design: a large read-only dataset, a
+small fixed number of pseudo-random touches into it per hash (64), and a
+cheap FNV mix combining them.
+
+**v1 (retired).** The original design used a CryptoNight/RandomX-style
+scratchpad, mixed over many sequential rounds (500,000+ BLAKE3 calls per
+hash). That shape is a deliberate choice those algorithms make to favor
+CPUs and starve GPUs and ASICs — which is exactly backwards from this
+project's stated goal. This was confirmed empirically, not just
+theoretically: a real OpenCL implementation of v1 benchmarked at ~75 H/s
+on an NVIDIA RTX 4070 Super, *slower* than a 4-thread CPU miner (~137 H/s)
+on the same machine. The root cause was architectural — 500,000+
+sequentially-dependent hash calls per attempt is a compute-bound workload,
+and compute-bound workloads don't play to a GPU's actual strength (memory
+bandwidth) — so it was fixed by changing the algorithm, not by tuning the
+GPU kernel further. v2's real-hardware benchmark on the same GPU: **~13
+million H/s**, roughly 95,000x faster than v1 and ~95,000x faster than the
+CPU miner. This is a breaking, consensus-level change — v1 and v2 chains
+are entirely incompatible with each other.
 
 ## Design goals
 
-1. **GPU-friendly**: massively parallel, uniform memory access, which maps
-   directly onto a GPU's strength (high memory bandwidth, thousands of
-   threads).
-2. **ASIC-resistant**: every hash requires random access into a dataset of
-   several hundred MB to a few GB. A dedicated ASIC would need to embed the
-   same amount of fast RAM as a GPU, which cancels out its cost/power
-   advantage.
-3. **Moderately CPU-resistant**: a CPU can technically compute the
-   algorithm (needed for node-side verification), but its throughput is far
-   below a GPU's due to lower memory bandwidth and a limited thread count.
+1. **GPU-friendly**: dominated by random reads from a large shared
+   dataset, which plays to a GPU's actual strength (high aggregate memory
+   bandwidth, thousands of concurrent threads) rather than raw
+   single-thread compute.
+2. **ASIC-resistant**: mining requires holding a multi-hundred-MB-to-GB
+   dataset in fast memory. A dedicated ASIC would need to embed the same
+   amount of fast RAM a GPU already ships with, which cancels out its
+   usual cost/power advantage. (Historical honesty: Ethash itself, which
+   this design is structurally modeled on, was eventually beaten by
+   dedicated ASICs after a few years in production. "ASIC-resistant" is
+   not a permanent property of any memory-hard scheme — it raises the
+   cost and delays the point where dedicated hardware becomes worthwhile,
+   it doesn't prevent it forever.)
+3. **CPU-uncompetitive by design**: a CPU can still compute the algorithm
+   (needed for node-side verification, which must work without a GPU),
+   but its throughput is not meant to be competitive with a GPU's for
+   actual mining — this is the intended, working consequence of the
+   design, not an oversight.
 
 ## Parameters
 
 | Constant | Testnet value | Description |
 |---|---|---|
 | `EPOCH_LENGTH` | 2048 blocks | How often the dataset is regenerated |
-| `CACHE_SIZE` | 16 MiB | Compact seed derived from the epoch seed |
-| `DATASET_SIZE` | 64 MiB (testnet/dev) / 2-4 GiB (mainnet target) | Full dataset used for mixing |
-| `SCRATCHPAD_SIZE` | 2 MiB | Working memory per hash attempt |
-| `MIX_ROUNDS` | 8 | Number of data-dependent mixing rounds |
+| `CACHE_SIZE` | 16 MiB | Compact seed the full dataset is derived from |
+| `DATASET_SIZE` | 64 MiB (testnet/dev) / 2-4 GiB (mainnet target) | Full read-only dataset |
+| `ITEM_SIZE` | 128 bytes | Size of one dataset item / the mix buffer — matches Ethash's proven value |
+| `ACCESSES` | 64 | Pseudo-random dataset touches per hash attempt — also Ethash-matching |
 
 Testnet sizes are intentionally reduced so development and tests run fast
-on modest hardware (including CPU-only). Mainnet values will be revisited
-with the auditor before any real launch.
+on modest hardware. Mainnet values will be revisited with the auditor
+before any real launch.
 
 ## Step 1 — Epoch seed
+
+Unchanged from v1:
 
 ```
 epoch(height) = height / EPOCH_LENGTH
@@ -47,52 +77,56 @@ epoch_seed(0) = BLAKE3("ONDRIS_GENESIS_EPOCH")
 epoch_seed(e) = BLAKE3(hash_of_block_at(e * EPOCH_LENGTH))   for e > 0
 ```
 
-The epoch seed depends on the actual content of the chain (the hash of a
-mined block), which prevents precomputing future datasets ahead of time.
+The epoch seed depends on the actual content of the chain, which prevents
+precomputing future datasets ahead of time.
 
-## Step 2 — Cache and dataset
+## Step 2 — Dataset
 
 ```
 cache = BLAKE3_XOF(epoch_seed, output_len = CACHE_SIZE)
 
-dataset[i] for i in [0, DATASET_SIZE / 64):
-    item = cache[(i * 64) % CACHE_SIZE .. +64]
+dataset[i] for i in [0, DATASET_SIZE / ITEM_SIZE):
+    item = cache[(i * ITEM_SIZE) % CACHE_SIZE .. +ITEM_SIZE]
     repeat 2 times:
-        item = BLAKE3(item || i.to_le_bytes())
-    dataset[i*64 .. +64] = item
+        item = BLAKE3_XOF(item || i.to_le_bytes(), output_len = ITEM_SIZE)
+    dataset[i*ITEM_SIZE .. +ITEM_SIZE] = item
 ```
 
-The cache is small and fast to generate (or verify in "light client" mode).
-The full dataset is what miners generate once per epoch and keep in memory
-(VRAM) to mine the whole epoch.
+Same shape as v1 (cache expansion + per-item re-hashing), just with
+128-byte items instead of 32-byte ones. Generated once per epoch by every
+node and miner from the small `cache` — never transferred over the
+network.
 
 ## Step 3 — Hashing one attempt (header + nonce)
 
 ```
-input   = header_bytes || nonce.to_le_bytes()
-seed    = BLAKE3(input)                       // 32 bytes
-prng    = Xoshiro256** seeded with `seed`
-scratchpad = [0u8; SCRATCHPAD_SIZE]
+input = header_bytes || nonce.to_le_bytes()
+seed  = BLAKE3(input)                              // 32 bytes
+mix   = BLAKE3_XOF(seed, output_len = ITEM_SIZE)    // 128 bytes
 
-// Init: fill the scratchpad with pseudo-randomly chosen slices of the
-// dataset (this is where "memory width" is required)
-for each 64-byte block of the scratchpad:
-    idx = prng.next_u64() % (DATASET_SIZE / 64)
-    scratchpad[block] = dataset[idx*64 .. +64] XOR extended_seed(block)
+seed_word0 = seed[0..4] as u32 (little-endian)
 
-// Mixing: MIX_ROUNDS rounds of mixing, dependent on data already written
-for round in 0..MIX_ROUNDS:
-    for each 64-byte block of the scratchpad at position p:
-        dep_idx = prng.next_u64() % (SCRATCHPAD_SIZE / 64)   // depends on current state
-        scratchpad[p] = BLAKE3(scratchpad[p] || scratchpad[dep_idx])[..64]
+for i in 0..ACCESSES:
+    mix_word = mix[(i % (ITEM_SIZE/4)) * 4 .. +4] as u32
+    p        = fnv(seed_word0 XOR i, mix_word) mod (DATASET_SIZE / ITEM_SIZE)
+    item     = dataset[p * ITEM_SIZE .. +ITEM_SIZE]
+    for each 4-byte word w at position k in mix and item:
+        mix[k] = fnv(mix[k], item[k])
 
-final_hash = BLAKE3(scratchpad)   // 32 bytes
+// Compress the 128-byte mix down to 32 bytes: fold each group of four
+// consecutive words with fnv (same compression Ethash uses).
+compressed = fold_fnv(mix)   // 32 bytes
+
+final_hash = BLAKE3(seed || compressed)   // 32 bytes
 ```
 
-The mixing step reads and writes the scratchpad in a way that **depends on
-data already computed** (like CryptoNight/RandomX): it's impossible to
-parallelize all rounds ahead of time, which limits the advantage of a fixed
-circuit without enough memory to hold the intermediate state.
+Where `fnv(a, b) = (a * 0x01000193) XOR b` — the exact FNV-1 variant
+Ethash itself uses for this purpose. It's intentionally not
+cryptographically strong on its own: its job is to be cheap and to force a
+real dependency on the dataset content, not to provide security. Security
+comes from the BLAKE3 calls that bookend it (seed derivation, mix
+expansion, and the final hash), which is exactly the same division of
+labor Ethash makes with Keccak.
 
 ## Step 4 — Validation
 
@@ -100,34 +134,29 @@ circuit without enough memory to hold the intermediate state.
 valid(final_hash, target) ⟺ interpret(final_hash) as big-endian <= target
 ```
 
-`target` is derived from the current difficulty, exactly like Bitcoin's
-`nBits` (32-bit compact format: exponent + mantissa).
+`target` is derived from the current difficulty as `MAX_TARGET /
+difficulty` (see `docs/ARCHITECTURE.md` for why it's not Bitcoin-style
+compact bits).
 
-## Node-side verification (no mining required)
+## Node-side verification
 
-A node that receives a block must be able to verify the PoW without having
-mined it. Two options, to be settled before the final implementation:
-
-- **"Full" verification**: the node also keeps the full dataset for the
-  current epoch (like an Ethash full node) — expensive in RAM but simple.
-- **"Light" verification**: regenerate on the fly, for the few indices
-  actually accessed during the computation, the dataset values needed from
-  the `cache` alone (like an Ethash light client) — slower per hash but
-  negligible RAM.
-
-For the first implementation (testnet), we choose **full** verification to
-keep things simple; "light" mode is documented as future work.
+Every node keeps the current epoch's full dataset in RAM (same "full
+verification" approach as v1) to verify a received block's PoW — no
+scratchpad or heavy per-hash compute involved this time, so verification
+is now dramatically cheaper too: 64 dataset touches and a couple of BLAKE3
+calls per verification, down from hundreds of thousands.
 
 ## What is NOT done yet (future work, not to be presented as delivered)
 
-- **GPU kernel (OpenCL/CUDA)**: this spec defines the consensus rules via a
-  CPU reference implementation. A performant GPU miner is separate work
-  that will port this same logic to GPU.
+- **Real-hardware GPU throughput validated** (~13M H/s on an RTX 4070
+  Super) but not yet tuned further — occupancy, work-group sizing, and
+  larger batch sizes haven't been explored past the first working design.
+- **CUDA-specific kernel**: only an OpenCL kernel exists; it runs on
+  NVIDIA hardware via NVIDIA's OpenCL implementation, but a native CUDA
+  path (or AMD-specific tuning) hasn't been written or benchmarked.
 - **"Useful compute" layer** discussed during design (redirecting part of
   the mining work toward reusable computation): research-grade, requires a
   cheap verification mechanism for the "useful" work so it doesn't open a
-  vulnerability (a node must never have to redo the entire useful
-  computation to verify a block). Not implemented in this first version —
-  the interface is planned but empty.
+  vulnerability. Not implemented — the interface is planned but empty.
 - **Independent cryptographic audit** — a prerequisite for any launch with
   real value at stake.

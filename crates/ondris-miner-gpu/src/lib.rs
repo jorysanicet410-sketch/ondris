@@ -5,4 +5,3 @@
 pub mod blake3_ref;
 pub mod gpu;
 pub mod ondris_hash_ref;
-pub mod xoshiro_ref;

@@ -14,15 +14,25 @@ RAM) rather than hoping nobody builds the corresponding ASIC.
 
 ## Technical approach
 
-OndrisHash combines, in an original architecture, cryptographic primitives
-that are already audited (BLAKE3) rather than introducing a new, unproven
-hash primitive:
+OndrisHash builds on a cryptographic primitive that's already audited
+(BLAKE3) rather than introducing a new, unproven hash primitive, combined
+in an Ethash-style architecture — the same shape that has secured
+Ethereum's mainnet for years:
 
-- a **dataset regenerated per epoch** (like Ethash), derived from the
-  chain's actual content — prevents precomputation;
-- a **scratchpad mixed in a data-dependent way** on data already written
-  (like CryptoNight/RandomX) — prevents trivial parallelization without
-  enough memory to hold the intermediate state.
+- a **dataset regenerated per epoch**, derived from the chain's actual
+  content — prevents precomputation;
+- a **small, fixed number of pseudo-random reads into that dataset per
+  hash attempt** (64), combined with a cheap, non-cryptographic FNV
+  mix — dominates each hash attempt with real memory bandwidth rather
+  than raw compute, which is what makes it play to a GPU's actual
+  strength.
+
+An earlier design instead mixed a scratchpad over hundreds of thousands
+of sequential BLAKE3 calls per hash (CryptoNight/RandomX-style) — that
+shape is a deliberate choice those algorithms make to favor CPUs and
+starve GPUs, which is exactly backwards from this project's goal, and was
+confirmed in practice before being replaced: see
+[ALGORITHM.md](ALGORITHM.md)'s revision history for the measured numbers.
 
 Full details are in [ALGORITHM.md](ALGORITHM.md), including its current
 limitations and what remains before an audit.
@@ -34,8 +44,8 @@ limitations and what remains before an audit.
 | OndrisHash algorithm (CPU reference implementation) | Functional, unaudited |
 | Node (chain + P2P network + RPC) | Functional, testnet only |
 | CLI wallet | Functional |
-| Reference CPU miner | Functional |
-| GPU miner (OpenCL) | Functional, correctness-validated on real hardware (RTX 4070 Super); throughput not yet optimized |
+| Reference CPU miner | Functional (~137 H/s, 4 threads, reference hardware) |
+| GPU miner (OpenCL) | Functional, correctness-validated on real hardware (RTX 4070 Super); ~13M H/s measured on the same GPU, ~95,000x the CPU reference miner |
 | Fork/reorg handling | Functional (see docs/ARCHITECTURE.md for known simplifications) |
 | Independent cryptographic audit | Not done |
 | "Useful compute" layer | Not implemented (research-grade) |

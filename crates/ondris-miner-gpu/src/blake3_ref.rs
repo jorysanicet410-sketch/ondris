@@ -1,7 +1,9 @@
-//! A from-scratch reimplementation of plain (unkeyed, non-XOF) BLAKE3
-//! hashing, single-shot only (the whole input is available upfront — we
-//! never need BLAKE3's incremental `update()` API since every call site
-//! in `ondris_pow::ondris_hash` already has its full input in hand).
+//! A from-scratch reimplementation of plain (unkeyed) BLAKE3 hashing,
+//! single-shot only (the whole input is available upfront — we never need
+//! BLAKE3's incremental `update()` API since every call site in
+//! `ondris_pow::ondris_hash` already has its full input in hand), plus a
+//! narrow XOF (extendable-output) function covering the one case this
+//! project needs: expanding a 32-byte seed into a longer keystream.
 //!
 //! This exists purely as a stepping stone: getting BLAKE3's chunk/tree
 //! structure right is easy to get subtly wrong, and OpenCL C is a
@@ -121,6 +123,31 @@ fn chaining_value_of(
     [
         out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7],
     ]
+}
+
+/// BLAKE3's extendable-output (XOF) mode, but only for the one case this
+/// crate actually needs: expanding a 32-byte seed into a longer
+/// keystream. A 32-byte input is always exactly one block of one chunk,
+/// so the "root node" is just that single block, computed once — BLAKE3's
+/// real XOF mechanism is to replay that same root compression with an
+/// incrementing `counter` to produce as many 64-byte output blocks as
+/// needed (this is not a simplification specific to this case; it's how
+/// BLAKE3 XOF actually works for any single-chunk root).
+pub fn xof_from_32_bytes(seed: &[u8; 32], out_len: usize) -> Vec<u8> {
+    let block_words = words_from_le_bytes_padded(seed);
+    let flags = CHUNK_START | CHUNK_END | ROOT;
+
+    let mut out = Vec::with_capacity(out_len + BLOCK_LEN);
+    let mut counter: u64 = 0;
+    while out.len() < out_len {
+        let out16 = compress(IV, block_words, counter, seed.len() as u32, flags);
+        for word in out16 {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        counter += 1;
+    }
+    out.truncate(out_len);
+    out
 }
 
 /// Hashes one chunk (up to 1024 bytes) of the overall input, returning its
@@ -244,6 +271,26 @@ mod tests {
             "mismatch for input length {}",
             data.len()
         );
+    }
+
+    fn check_xof(seed: &[u8; 32], out_len: usize) {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(seed);
+        let mut reader = hasher.finalize_xof();
+        let mut expected = vec![0u8; out_len];
+        reader.fill(&mut expected);
+
+        let got = xof_from_32_bytes(seed, out_len);
+        assert_eq!(got, expected, "XOF mismatch for out_len={out_len}");
+    }
+
+    #[test]
+    fn xof_matches_real_blake3_for_various_lengths_and_seeds() {
+        for &out_len in &[1usize, 32, 63, 64, 65, 96, 127, 128, 129, 200] {
+            check_xof(&[0u8; 32], out_len);
+            check_xof(&[0xffu8; 32], out_len);
+            check_xof(blake3::hash(b"ondris-xof-seed").as_bytes(), out_len);
+        }
     }
 
     #[test]

@@ -2,13 +2,28 @@
 //! algorithm. See `docs/ALGORITHM.md` at the repo root for the full spec
 //! and warnings about its unaudited status.
 //!
-//! Only combines already-audited primitives (BLAKE3) in an original
-//! architecture: a dataset regenerated per epoch + a scratchpad mixed in a
-//! way that depends on data already written.
+//! Structurally, this is an Ethash-style design: a large read-only dataset
+//! regenerated per epoch, a small number of pseudo-random touches into it
+//! per hash attempt, and a cheap (non-cryptographic) FNV mix combining
+//! them — the same shape that's secured Ethereum's mainnet for years.
+//! BLAKE3 (audited, standardized) is the only cryptographic primitive
+//! involved, used for seed derivation, expanding that seed into the
+//! initial mix state, and sealing the final result; FNV mixing in between
+//! doesn't need to be cryptographically strong on its own, only
+//! unpredictable enough to force real dataset reads.
+//!
+//! An earlier version of this algorithm instead used a CryptoNight/
+//! RandomX-style scratchpad mixed over many sequential rounds. That shape
+//! is a deliberate choice those algorithms make to favor CPUs and starve
+//! GPUs/ASICs — exactly backwards from this project's stated goal, and
+//! confirmed in practice: benchmarking a GPU implementation of it showed
+//! *worse* throughput than a 4-thread CPU miner, because 500,000+
+//! sequentially-dependent BLAKE3 calls per hash is compute-bound, not
+//! memory-bandwidth-bound, and compute-bound workloads don't play to a
+//! GPU's actual strength. This version fixes that at the algorithm level,
+//! not by tuning the old one further.
 
 use ondris_primitives::Hash256;
-use rand::{RngCore, SeedableRng};
-use rand_xoshiro::Xoshiro256StarStar;
 
 /// Block height interval at which a new dataset is generated.
 pub const EPOCH_LENGTH: u64 = 2048;
@@ -18,12 +33,28 @@ pub const CACHE_SIZE: usize = 16 * 1024 * 1024;
 /// fast dev/test cycles; to be revisited with an audit and real GPU
 /// benchmarks before any mainnet launch — target 2-4 GiB).
 pub const DATASET_SIZE: usize = 64 * 1024 * 1024;
-/// Size of the working memory per hash attempt.
-pub const SCRATCHPAD_SIZE: usize = 2 * 1024 * 1024;
-/// Number of data-dependent mixing rounds.
-pub const MIX_ROUNDS: usize = 8;
-/// Size of one dataset/scratchpad item (= BLAKE3 output size).
-pub const ITEM_SIZE: usize = 32;
+/// Size of one dataset item / the mix buffer, in bytes. 128 matches
+/// Ethash's proven value: large enough that a random access amortizes
+/// well against DRAM/PCIe overhead, small enough to expand cheaply.
+pub const ITEM_SIZE: usize = 128;
+/// Number of pseudo-random dataset touches per hash attempt. Also an
+/// Ethash-matching value — the point is a hash that's dominated by a
+/// couple dozen real random memory reads, not by raw compute.
+pub const ACCESSES: usize = 64;
+
+const FNV_PRIME: u32 = 0x0100_0193;
+
+fn fnv(a: u32, b: u32) -> u32 {
+    a.wrapping_mul(FNV_PRIME) ^ b
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
 
 pub fn epoch_of(height: u64) -> u64 {
     height / EPOCH_LENGTH
@@ -58,7 +89,9 @@ impl Dataset {
     }
 
     /// Size-parameterized variant, used by tests to stay fast (the "real"
-    /// sizes above are too heavy for a unit test loop).
+    /// sizes above are too heavy for a unit test loop). Item size is
+    /// always `ITEM_SIZE` — only the overall cache/dataset byte budgets
+    /// (and therefore the item *count*) vary.
     pub fn generate_with_sizes(
         epoch: u64,
         seed: Hash256,
@@ -79,7 +112,8 @@ impl Dataset {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(&item);
                 hasher.update(&(i as u64).to_le_bytes());
-                item = *hasher.finalize().as_bytes();
+                let mut reader = hasher.finalize_xof();
+                reader.fill(&mut item);
             }
             bytes[i * ITEM_SIZE..(i + 1) * ITEM_SIZE].copy_from_slice(&item);
         }
@@ -106,60 +140,55 @@ impl Dataset {
 /// `header_bytes` must be the canonical serialization of the block header
 /// WITHOUT the nonce (the nonce is appended here).
 pub fn ondris_hash(header_bytes: &[u8], nonce: u64, dataset: &Dataset) -> Hash256 {
-    ondris_hash_with_sizes(header_bytes, nonce, dataset, SCRATCHPAD_SIZE, MIX_ROUNDS)
+    ondris_hash_with_accesses(header_bytes, nonce, dataset, ACCESSES)
 }
 
-/// Size-parameterized variant, used by tests to stay fast.
-pub fn ondris_hash_with_sizes(
+/// Access-count-parameterized variant, used by tests.
+pub fn ondris_hash_with_accesses(
     header_bytes: &[u8],
     nonce: u64,
     dataset: &Dataset,
-    scratchpad_size: usize,
-    mix_rounds: usize,
+    accesses: usize,
 ) -> Hash256 {
     let mut input = Vec::with_capacity(header_bytes.len() + 8);
     input.extend_from_slice(header_bytes);
     input.extend_from_slice(&nonce.to_le_bytes());
     let seed = *blake3::hash(&input).as_bytes();
 
-    let mut rng = Xoshiro256StarStar::from_seed(seed);
+    let mut mix = vec![0u8; ITEM_SIZE];
+    xof_fill(&seed, &mut mix);
 
-    let n_blocks = (scratchpad_size / ITEM_SIZE).max(1);
-    let mut scratchpad = vec![0u8; n_blocks * ITEM_SIZE];
+    let seed_word0 = read_u32_le(&seed, 0);
+    let words_per_item = ITEM_SIZE / 4;
+    let n_items = (dataset.len_bytes() / ITEM_SIZE).max(1) as u64;
 
-    // Init: populate the scratchpad with pseudo-randomly chosen slices of
-    // the dataset. This is where memory bandwidth width is required.
-    for b in 0..n_blocks {
-        let idx = rng.next_u64();
-        let d = dataset.item(idx);
-        let off = b * ITEM_SIZE;
-        for k in 0..ITEM_SIZE {
-            scratchpad[off + k] = d[k] ^ seed[k];
+    for i in 0..accesses {
+        let mix_word = read_u32_le(&mix, (i % words_per_item) * 4);
+        let p = fnv(seed_word0 ^ i as u32, mix_word) as u64 % n_items;
+        let item = dataset.item(p);
+        for w in 0..words_per_item {
+            let mixed = fnv(read_u32_le(&mix, w * 4), read_u32_le(item, w * 4));
+            write_u32_le(&mut mix, w * 4, mixed);
         }
     }
 
-    // Mixing: rounds that depend on data already written into the
-    // scratchpad, which prevents parallelizing all rounds ahead of time
-    // without enough memory to hold the intermediate state.
-    for _round in 0..mix_rounds {
-        for b in 0..n_blocks {
-            let dep_idx = (rng.next_u64() as usize) % n_blocks;
-            let off = b * ITEM_SIZE;
-            let dep_off = dep_idx * ITEM_SIZE;
-
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&scratchpad[off..off + ITEM_SIZE]);
-            let dep_copy: [u8; ITEM_SIZE] = scratchpad[dep_off..dep_off + ITEM_SIZE]
-                .try_into()
-                .expect("slice of size ITEM_SIZE");
-            hasher.update(&dep_copy);
-            let out = *hasher.finalize().as_bytes();
-
-            scratchpad[off..off + ITEM_SIZE].copy_from_slice(&out);
-        }
+    // Compress the ITEM_SIZE-byte mix down to 32 bytes: fold each group of
+    // four consecutive words together with FNV (same compression Ethash
+    // uses on its 128-byte mix before the final hash).
+    let mut compressed = [0u8; 32];
+    for i in 0..8 {
+        let base = i * 16;
+        let w0 = read_u32_le(&mix, base);
+        let w1 = read_u32_le(&mix, base + 4);
+        let w2 = read_u32_le(&mix, base + 8);
+        let w3 = read_u32_le(&mix, base + 12);
+        write_u32_le(&mut compressed, i * 4, fnv(fnv(fnv(w0, w1), w2), w3));
     }
 
-    Hash256::hash(&scratchpad)
+    let mut final_input = Vec::with_capacity(64);
+    final_input.extend_from_slice(&seed);
+    final_input.extend_from_slice(&compressed);
+    Hash256::hash(&final_input)
 }
 
 /// Checks that a hash meets a difficulty target (big-endian comparison,
@@ -180,8 +209,8 @@ mod tests {
     fn deterministic_for_same_input() {
         let ds = tiny_dataset();
         let header = b"header-bytes";
-        let a = ondris_hash_with_sizes(header, 42, &ds, 4096, 2);
-        let b = ondris_hash_with_sizes(header, 42, &ds, 4096, 2);
+        let a = ondris_hash_with_accesses(header, 42, &ds, 8);
+        let b = ondris_hash_with_accesses(header, 42, &ds, 8);
         assert_eq!(a, b);
     }
 
@@ -189,8 +218,8 @@ mod tests {
     fn different_nonce_changes_hash() {
         let ds = tiny_dataset();
         let header = b"header-bytes";
-        let a = ondris_hash_with_sizes(header, 1, &ds, 4096, 2);
-        let b = ondris_hash_with_sizes(header, 2, &ds, 4096, 2);
+        let a = ondris_hash_with_accesses(header, 1, &ds, 8);
+        let b = ondris_hash_with_accesses(header, 2, &ds, 8);
         assert_ne!(a, b);
     }
 
@@ -199,9 +228,21 @@ mod tests {
         let ds1 = Dataset::generate_with_sizes(0, Hash256::hash(b"seed-a"), 4096, 8192);
         let ds2 = Dataset::generate_with_sizes(0, Hash256::hash(b"seed-b"), 4096, 8192);
         let header = b"header-bytes";
-        let a = ondris_hash_with_sizes(header, 1, &ds1, 4096, 2);
-        let b = ondris_hash_with_sizes(header, 1, &ds2, 4096, 2);
+        let a = ondris_hash_with_accesses(header, 1, &ds1, 8);
+        let b = ondris_hash_with_accesses(header, 1, &ds2, 8);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn more_accesses_still_deterministic_and_differs_from_fewer() {
+        let ds = tiny_dataset();
+        let header = b"header-bytes";
+        let few = ondris_hash_with_accesses(header, 1, &ds, 4);
+        let many = ondris_hash_with_accesses(header, 1, &ds, 64);
+        assert_ne!(
+            few, many,
+            "different access counts should (almost always) diverge"
+        );
     }
 
     #[test]

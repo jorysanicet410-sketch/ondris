@@ -26,7 +26,7 @@ limitations and remaining work before a serious mainnet launch.
 - `ondris-network` — basic TCP P2P gossip.
 - `ondris-node` — full daemon: chain + network + HTTP RPC API.
 - `ondris-miner` — reference CPU miner (multi-threaded).
-- `ondris-miner-gpu` — OpenCL GPU miner. Its kernel is a mechanical translation of a Rust reference chain (BLAKE3 → xoshiro256\*\* → the full mixing algorithm) that's unit-tested against the real `blake3`/`rand_xoshiro` crates first, then checked bit-for-bit against `ondris_pow::ondris_hash` on real hardware via `ondris-miner-gpu self-test` — run that before mining on any new GPU/driver. Correctness-validated on an RTX 4070 Super; raw throughput is not yet optimized (see docs/ARCHITECTURE.md).
+- `ondris-miner-gpu` — OpenCL GPU miner. Its kernel is a mechanical translation of a Rust reference chain (BLAKE3 → the FNV dataset-mixing algorithm) that's unit-tested against the real `blake3` crate first, then checked bit-for-bit against `ondris_pow::ondris_hash` on real hardware via `ondris-miner-gpu self-test` — run that before mining on any new GPU/driver. Correctness-validated on an RTX 4070 Super at ~13,000,000 H/s — see docs/ARCHITECTURE.md for how that compares to the CPU miner and the algorithm redesign that got it there.
 - `ondris-wallet` — CLI wallet with encrypted keystore (Argon2 + AES-256-GCM).
 
 What **does not exist yet**: the "useful compute" layer discussed during
@@ -95,13 +95,15 @@ PASSED`. Then:
 cargo run --release --bin ondris-miner-gpu -- mine \
   --node http://127.0.0.1:8080 \
   --address <address-shown-by-the-wallet> \
-  --batch-size 512
+  --batch-size 65536
 ```
 
-`--batch-size` is nonces tried per kernel launch; each one needs its own
-`SCRATCHPAD_SIZE`-byte slice of a single GPU buffer, so raising it is
-bounded by both total VRAM and the driver's max single-allocation size
-(which is often well under total VRAM).
+`--batch-size` is nonces tried per kernel launch. The per-epoch dataset
+(the only large buffer this algorithm needs) is uploaded once and shared
+read-only across every work-item, so batch size is no longer bounded by a
+per-nonce private allocation the way the original scratchpad-based design
+was — 65536 is a reasonable default; raise it further if the benchmark
+subcommand shows headroom on your GPU.
 
 ## Send a transaction
 

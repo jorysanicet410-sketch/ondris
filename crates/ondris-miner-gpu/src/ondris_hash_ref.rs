@@ -1,59 +1,70 @@
-//! Full OndrisHash mixing algorithm, built only from this crate's own
-//! `blake3_ref` and `xoshiro_ref` — no dependency on the real `blake3` /
-//! `rand_xoshiro` crates. This is the last Rust-side checkpoint before
-//! transcribing to OpenCL: if this matches `ondris_pow::ondris_hash_with_sizes`
-//! bit for bit, then `blake3_ref` + `xoshiro_ref` + this mixing logic
-//! together reproduce the real algorithm exactly, and the OpenCL kernel
-//! only needs to be a faithful, mechanical translation of what's here.
+//! Full OndrisHash algorithm, built only from this crate's own
+//! `blake3_ref` — no dependency on the real `blake3` crate. This is the
+//! last Rust-side checkpoint before transcribing to OpenCL: if this
+//! matches `ondris_pow::ondris_hash_with_accesses` bit for bit, then
+//! `blake3_ref` plus this FNV mixing logic together reproduce the real
+//! algorithm exactly, and the OpenCL kernel only needs to be a faithful,
+//! mechanical translation of what's here.
 
 use crate::blake3_ref;
-use crate::xoshiro_ref::Xoshiro256StarStar;
 
-const ITEM_SIZE: usize = 32;
+const ITEM_SIZE: usize = 128;
+const FNV_PRIME: u32 = 0x0100_0193;
+
+fn fnv(a: u32, b: u32) -> u32 {
+    a.wrapping_mul(FNV_PRIME) ^ b
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
 
 /// `dataset` is the raw dataset bytes (see `ondris_pow::Dataset::bytes`).
-pub fn ondris_hash_with_sizes(
+pub fn ondris_hash_with_accesses(
     header_bytes: &[u8],
     nonce: u64,
     dataset: &[u8],
-    scratchpad_size: usize,
-    mix_rounds: usize,
+    accesses: usize,
 ) -> [u8; 32] {
     let mut input = Vec::with_capacity(header_bytes.len() + 8);
     input.extend_from_slice(header_bytes);
     input.extend_from_slice(&nonce.to_le_bytes());
     let seed = blake3_ref::hash(&input);
 
-    let mut rng = Xoshiro256StarStar::from_seed(seed);
-    let n_blocks = (scratchpad_size / ITEM_SIZE).max(1);
+    let mut mix = blake3_ref::xof_from_32_bytes(&seed, ITEM_SIZE);
+
+    let seed_word0 = read_u32_le(&seed, 0);
+    let words_per_item = ITEM_SIZE / 4;
     let n_items = (dataset.len() / ITEM_SIZE).max(1) as u64;
-    let mut scratchpad = vec![0u8; n_blocks * ITEM_SIZE];
 
-    for b in 0..n_blocks {
-        let idx = (rng.next_u64() % n_items) as usize;
-        let off = b * ITEM_SIZE;
-        let item = &dataset[idx * ITEM_SIZE..idx * ITEM_SIZE + ITEM_SIZE];
-        for k in 0..ITEM_SIZE {
-            scratchpad[off + k] = item[k] ^ seed[k];
+    for i in 0..accesses {
+        let mix_word = read_u32_le(&mix, (i % words_per_item) * 4);
+        let p = (fnv(seed_word0 ^ i as u32, mix_word) as u64 % n_items) as usize;
+        let item = &dataset[p * ITEM_SIZE..p * ITEM_SIZE + ITEM_SIZE];
+        for w in 0..words_per_item {
+            let mixed = fnv(read_u32_le(&mix, w * 4), read_u32_le(item, w * 4));
+            write_u32_le(&mut mix, w * 4, mixed);
         }
     }
 
-    for _round in 0..mix_rounds {
-        for b in 0..n_blocks {
-            let dep_idx = (rng.next_u64() as usize) % n_blocks;
-            let off = b * ITEM_SIZE;
-            let dep_off = dep_idx * ITEM_SIZE;
-
-            let mut buf = [0u8; ITEM_SIZE * 2];
-            buf[..ITEM_SIZE].copy_from_slice(&scratchpad[off..off + ITEM_SIZE]);
-            buf[ITEM_SIZE..].copy_from_slice(&scratchpad[dep_off..dep_off + ITEM_SIZE]);
-            let out = blake3_ref::hash(&buf);
-
-            scratchpad[off..off + ITEM_SIZE].copy_from_slice(&out);
-        }
+    let mut compressed = [0u8; 32];
+    for i in 0..8 {
+        let base = i * 16;
+        let w0 = read_u32_le(&mix, base);
+        let w1 = read_u32_le(&mix, base + 4);
+        let w2 = read_u32_le(&mix, base + 8);
+        let w3 = read_u32_le(&mix, base + 12);
+        write_u32_le(&mut compressed, i * 4, fnv(fnv(fnv(w0, w1), w2), w3));
     }
 
-    blake3_ref::hash(&scratchpad)
+    let mut final_input = Vec::with_capacity(64);
+    final_input.extend_from_slice(&seed);
+    final_input.extend_from_slice(&compressed);
+    blake3_ref::hash(&final_input)
 }
 
 #[cfg(test)]
@@ -63,13 +74,13 @@ mod tests {
 
     #[test]
     fn matches_the_real_ondris_pow_crate() {
-        let seed = Hash256::hash(b"gpu-validation-seed");
+        let seed = Hash256::hash(b"gpu-validation-seed-v2");
         let dataset = ondris_pow::Dataset::generate_with_sizes(0, seed, 4096, 8192);
 
         for header in [&b"header-a"[..], b"a different, longer header value"] {
             for nonce in [0u64, 1, 42, u64::MAX, 123456789] {
-                let expected = ondris_pow::ondris_hash_with_sizes(header, nonce, &dataset, 4096, 3);
-                let got = ondris_hash_with_sizes(header, nonce, dataset.bytes(), 4096, 3);
+                let expected = ondris_pow::ondris_hash_with_accesses(header, nonce, &dataset, 8);
+                let got = ondris_hash_with_accesses(header, nonce, dataset.bytes(), 8);
                 assert_eq!(
                     got,
                     *expected.as_bytes(),
@@ -81,10 +92,7 @@ mod tests {
 
     #[test]
     fn matches_the_real_crate_at_default_sizes() {
-        // The real default sizes (SCRATCHPAD_SIZE etc.) — slower, but this
-        // is exactly what the GPU kernel needs to reproduce, including
-        // the multi-chunk BLAKE3 path over a multi-megabyte scratchpad.
-        let seed = Hash256::hash(b"default-size-check");
+        let seed = Hash256::hash(b"default-size-check-v2");
         let dataset = ondris_pow::Dataset::generate_with_sizes(
             0,
             seed,
@@ -93,13 +101,7 @@ mod tests {
         );
         let header = b"a realistic-length header field for this check";
         let expected = ondris_pow::ondris_hash(header, 7, &dataset);
-        let got = ondris_hash_with_sizes(
-            header,
-            7,
-            dataset.bytes(),
-            ondris_pow::SCRATCHPAD_SIZE,
-            ondris_pow::MIX_ROUNDS,
-        );
+        let got = ondris_hash_with_accesses(header, 7, dataset.bytes(), ondris_pow::ACCESSES);
         assert_eq!(got, *expected.as_bytes());
     }
 }

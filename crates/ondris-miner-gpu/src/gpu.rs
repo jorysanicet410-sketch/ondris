@@ -19,6 +19,10 @@ pub struct Gpu {
     pub queue: CommandQueue,
     pub program: Program,
     pub device_name: String,
+    pub max_compute_units: u32,
+    pub max_mem_alloc_size: u64,
+    pub global_mem_size: u64,
+    pub max_work_group_size: usize,
 }
 
 impl Gpu {
@@ -43,6 +47,10 @@ impl Gpu {
         let device_name = device
             .name()
             .unwrap_or_else(|_| "<unknown device>".to_string());
+        let max_compute_units = device.max_compute_units().unwrap_or(0);
+        let max_mem_alloc_size = device.max_mem_alloc_size().unwrap_or(0);
+        let global_mem_size = device.global_mem_size().unwrap_or(0);
+        let max_work_group_size = device.max_work_group_size().unwrap_or(0);
 
         let context = Context::from_device(&device)?;
         // `create_default` is deprecated in favor of the properties-list
@@ -61,6 +69,10 @@ impl Gpu {
             queue,
             program,
             device_name,
+            max_compute_units,
+            max_mem_alloc_size,
+            global_mem_size,
+            max_work_group_size,
         })
     }
 
@@ -103,17 +115,15 @@ impl Gpu {
         dataset: &[u8],
         header_bytes: &[u8],
         nonce: u64,
-        scratchpad_size: u32,
-        mix_rounds: u32,
+        accesses: u32,
     ) -> anyhow::Result<[u8; 32]> {
         anyhow::ensure!(
-            header_bytes.len() + 8 <= 256,
+            header_bytes.len() + 8 <= 144,
             "header too long for the kernel's fixed input buffer"
         );
 
         let dataset_buf = self.buffer_ro(dataset)?;
         let header_buf = self.buffer_ro(header_bytes)?;
-        let scratchpad_buf = self.buffer_rw(scratchpad_size as usize)?;
         let digest_buf = self.buffer_rw(32)?;
 
         let kernel = self.kernel("ondris_hash_debug")?;
@@ -124,9 +134,7 @@ impl Gpu {
                 .set_arg(&header_buf)
                 .set_arg(&(header_bytes.len() as u32))
                 .set_arg(&(nonce as cl_ulong))
-                .set_arg(&scratchpad_size)
-                .set_arg(&mix_rounds)
-                .set_arg(&scratchpad_buf)
+                .set_arg(&accesses)
                 .set_arg(&digest_buf)
                 .set_global_work_size(1)
                 .enqueue_nd_range(&self.queue)?
@@ -143,19 +151,14 @@ impl Gpu {
     }
 
     /// Starts a mining session for one epoch's dataset: uploads the
-    /// dataset and allocates the (potentially huge — `batch_size *
-    /// scratchpad_size`) scratchpad pool exactly once, since re-doing
-    /// that on every single batch (as an earlier version of this file
-    /// did) turned multi-gigabyte transfers/allocations into the
-    /// dominant cost instead of the actual hashing.
-    pub fn mining_session(
-        &self,
-        dataset: &[u8],
-        scratchpad_size: u32,
-        batch_size: usize,
-    ) -> anyhow::Result<MiningSession<'_>> {
+    /// (read-only, shared-across-every-work-item) dataset exactly once.
+    /// Unlike the scratchpad-mixing design this replaced, there's no
+    /// per-work-item writable buffer to allocate here at all — each
+    /// thread's `mix` state is 128 bytes of private memory computed
+    /// entirely inside the kernel — so batch size is no longer bounded by
+    /// a `batch_size * multi-megabyte-scratchpad` global allocation.
+    pub fn mining_session(&self, dataset: &[u8]) -> anyhow::Result<MiningSession<'_>> {
         let dataset_buf = self.buffer_ro(dataset)?;
-        let scratchpad_pool = self.buffer_rw(scratchpad_size as usize * batch_size)?;
         let result_nonce = self.buffer_rw(8)?;
         let result_found = self.buffer_rw(4)?;
         let kernel = self.kernel("ondris_mine")?;
@@ -163,9 +166,6 @@ impl Gpu {
             gpu: self,
             dataset_buf,
             dataset_len: dataset.len() as u64,
-            scratchpad_pool,
-            scratchpad_size,
-            batch_size,
             result_nonce,
             result_found,
             kernel,
@@ -173,18 +173,13 @@ impl Gpu {
     }
 }
 
-/// Holds the buffers that stay constant across many kernel launches while
-/// mining a single block (and, for the dataset, across every block in the
-/// same epoch): the dataset and the scratchpad pool. Only the header,
-/// nonce base and target change per launch, and those are a few hundred
-/// bytes — cheap to re-upload every time.
+/// Holds the buffer that stays constant across many kernel launches
+/// mining the same epoch: the dataset. Header, nonce base, batch size and
+/// target all change per launch and are cheap to pass fresh each time.
 pub struct MiningSession<'a> {
     gpu: &'a Gpu,
     dataset_buf: Buffer<u8>,
     dataset_len: u64,
-    scratchpad_pool: Buffer<u8>,
-    scratchpad_size: u32,
-    batch_size: usize,
     result_nonce: Buffer<u8>,
     result_found: Buffer<u8>,
     kernel: Kernel,
@@ -197,11 +192,12 @@ impl MiningSession<'_> {
         &mut self,
         header_bytes: &[u8],
         nonce_base: u64,
-        mix_rounds: u32,
+        accesses: u32,
         target: &[u8; 32],
+        batch_size: usize,
     ) -> anyhow::Result<Option<u64>> {
         anyhow::ensure!(
-            header_bytes.len() + 8 <= 256,
+            header_bytes.len() + 8 <= 144,
             "header too long for the kernel's fixed input buffer"
         );
 
@@ -225,13 +221,11 @@ impl MiningSession<'_> {
                 .set_arg(&header_buf)
                 .set_arg(&(header_bytes.len() as u32))
                 .set_arg(&(nonce_base as cl_ulong))
-                .set_arg(&self.scratchpad_size)
-                .set_arg(&mix_rounds)
-                .set_arg(&self.scratchpad_pool)
+                .set_arg(&accesses)
                 .set_arg(&target_buf)
                 .set_arg(&self.result_nonce)
                 .set_arg(&self.result_found)
-                .set_global_work_size(self.batch_size)
+                .set_global_work_size(batch_size)
                 .enqueue_nd_range(&self.gpu.queue)?
         };
         event.wait()?;
