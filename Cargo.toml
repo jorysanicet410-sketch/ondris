@@ -15,7 +15,7 @@ members = [
 version = "0.1.0-testnet"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/jorysanicet410-sketch/ondris"
+repository = "https://github.com/ondris-project/ondris"
 
 [workspace.dependencies]
 blake3 = "1.5"
