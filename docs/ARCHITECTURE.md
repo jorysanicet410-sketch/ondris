@@ -187,17 +187,40 @@ Not yet done: further occupancy/work-group tuning past this first working
 design, and a native CUDA path (the current kernel runs on NVIDIA
 hardware via NVIDIA's OpenCL implementation, not CUDA directly).
 
+## Mempool persistence
+
+Pending transactions live in a `sled` tree (`ChainState::mempool_*`),
+keyed by transaction hash — not an in-memory `Vec`, so a node restart no
+longer loses them. This replaced an earlier design where `GET /work`
+destructively drained the whole mempool on every call: if the resulting
+block was never submitted (miner crash, a stale template beaten by a
+faster peer), those transactions were gone until the wallet resent them.
+`GET /work` now only *reads* a snapshot (`mempool_all`); a transaction is
+only actually removed once the block containing it is truly `Accepted`
+onto the canonical chain (`handle_outcome` in `ondris-node`), which reuses
+the same `requeue` mechanism a reorg already relies on to put displaced
+transactions back — a block getting reorged out and a work template never
+getting submitted are the same kind of event from the mempool's point of
+view (a transaction that didn't end up canonical after all), so both are
+handled by the same insert/remove pair rather than two separate code
+paths. A background task also rebroadcasts whatever's still pending every
+30 seconds, so a transaction that only reached one node still eventually
+reaches the rest of the network.
+
+Verified with a persistence test (insert into a mempool, drop and reopen
+`ChainState` at the same path, confirm the transaction is still there)
+and a live end-to-end run: submit a transaction, confirm two consecutive
+`GET /work` calls both still show it (not drained), kill and restart the
+node process entirely, confirm it's *still* pending after the restart,
+then mine a block and confirm the transaction gets included and the
+mempool clears.
+
 ## Known limitations (future work, not done yet)
 
 - **GPU miner further tuning**: correctness-validated and already
   GPU-scale (~13M H/s on an RTX 4070 Super, see "The GPU miner" above),
   but occupancy/work-group sizing and a native CUDA path haven't been
   explored past the first working design.
-- **Minimal mempool**: `GET /work` drains the mempool on every call; if the
-  resulting block is never submitted (miner crashes, restarts...), the
-  transactions it contained are lost until the wallet resends them.
-  Transactions displaced by a reorg *are* automatically re-queued (see
-  above), but there's still no persistent, re-broadcast-aware mempool.
 - **No peer discovery (DHT)**: static seed node list provided in config;
   orphan resolution broadcasts `GetBlock` to every connected peer rather
   than targeting whoever is most likely to have it. The transport itself

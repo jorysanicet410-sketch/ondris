@@ -53,7 +53,6 @@ struct Args {
 struct AppState {
     chain: Chain,
     network: Network,
-    mempool: Mutex<Vec<Transaction>>,
     /// Blocks received before their parent, keyed by the parent hash
     /// they're waiting on. Retried once that parent is accepted.
     orphans: Mutex<HashMap<Hash256, Vec<Block>>>,
@@ -126,8 +125,33 @@ async fn main() -> anyhow::Result<()> {
     let state: SharedState = Arc::new(AppState {
         chain,
         network: network.clone(),
-        mempool: Mutex::new(Vec::new()),
         orphans: Mutex::new(HashMap::new()),
+    });
+
+    // Mempool contents live in sled (see ChainState::mempool_*), so a
+    // transaction submitted just before a restart isn't lost — but it also
+    // won't reach any peer again unless something re-announces it, since
+    // the original NewTransaction broadcast only happened once. Rebroadcast
+    // whatever's still pending on an interval; this also helps a
+    // transaction that only reached one node eventually reach the rest of
+    // the network even if that first broadcast raced a peer's connection.
+    let rebroadcast_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            match rebroadcast_state.chain.state.mempool_all() {
+                Ok(pending) => {
+                    for tx in pending {
+                        rebroadcast_state
+                            .network
+                            .broadcast(Message::NewTransaction(tx))
+                            .await;
+                    }
+                }
+                Err(e) => tracing::warn!("could not read mempool for rebroadcast: {e}"),
+            }
+        }
     });
 
     let event_state = state.clone();
@@ -139,7 +163,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 NetworkEvent::NewTransaction(tx) => {
                     if tx.is_signature_valid() {
-                        event_state.mempool.lock().unwrap().push(tx.clone());
+                        if let Err(e) = event_state.chain.state.mempool_insert(&tx) {
+                            tracing::warn!("could not persist incoming transaction: {e}");
+                        }
                         event_state
                             .network
                             .broadcast(Message::NewTransaction(tx))
@@ -236,12 +262,14 @@ async fn handle_outcome(state: &SharedState, block: &Block, outcome: &SubmitOutc
                 .network
                 .broadcast(Message::NewBlock(block.clone()))
                 .await;
-            if !requeue.is_empty() {
-                let mut mempool = state.mempool.lock().unwrap();
-                for tx in requeue {
-                    if !mempool.iter().any(|t| t.hash() == tx.hash()) {
-                        mempool.push(tx.clone());
-                    }
+            for tx in &block.transactions {
+                if let Err(e) = state.chain.state.mempool_remove(&tx.hash()) {
+                    tracing::warn!("could not remove mined transaction from mempool: {e}");
+                }
+            }
+            for tx in requeue {
+                if let Err(e) = state.chain.state.mempool_insert(tx) {
+                    tracing::warn!("could not re-queue a displaced transaction: {e}");
                 }
             }
         }
@@ -318,10 +346,12 @@ async fn get_work(
     Query(q): Query<WorkQuery>,
 ) -> Result<Json<WorkTemplate>, AppError> {
     let miner: Address = q.miner.parse()?;
-    let pending: Vec<Transaction> = {
-        let mut mempool = state.mempool.lock().unwrap();
-        std::mem::take(&mut *mempool)
-    };
+    // A read, not a drain: a work template that's never submitted (miner
+    // crash, restart, a stale template beaten by a faster peer) must not
+    // cost these transactions their place in the mempool. They're only
+    // actually removed once a block containing them is truly accepted
+    // (see the Accepted branch of handle_outcome).
+    let pending: Vec<Transaction> = state.chain.state.mempool_all()?;
     let (block, _dataset) = state.chain.work_template(miner, pending)?;
     let next_height = block.header.height;
     let epoch = ondris_pow::epoch_of(next_height);
@@ -369,7 +399,7 @@ async fn submit_tx(
         return Err(anyhow::anyhow!("invalid signature").into());
     }
     let hash = tx.hash();
-    state.mempool.lock().unwrap().push(tx.clone());
+    state.chain.state.mempool_insert(&tx)?;
     state.network.broadcast(Message::NewTransaction(tx)).await;
     Ok(Json(SubmitTxResponse { tx_hash: hash }))
 }

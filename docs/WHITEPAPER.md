@@ -71,9 +71,11 @@ at that time — not of this document.
 
 ## Next steps
 
-Done since the testnet opened: chain fork/reorganization handling, and a
-reference GPU miner (OpenCL, correctness-validated and GPU-scale — see
-docs/ARCHITECTURE.md). What's left:
+Done since the testnet opened: chain fork/reorganization handling, a
+reference GPU miner (OpenCL, correctness-validated and GPU-scale), an
+encrypted and mutually-authenticated P2P transport (Noise_XX), and a
+persistent, re-broadcast-aware mempool — see docs/ARCHITECTURE.md for how
+each of these works and what they don't cover yet. What's left:
 
 1. Public testnet, open to volunteer miners.
 2. Fixing bugs surfaced by the testnet.
@@ -81,13 +83,9 @@ docs/ARCHITECTURE.md). What's left:
    remaining item, and a prerequisite for trusting the v2 algorithm with
    real value.
 4. Real peer discovery (currently a static seed list) — the transport
-   itself is now encrypted and mutually authenticated (Noise_XX, see
-   docs/ARCHITECTURE.md), so what's left here is finding peers, not
-   securing the link to ones already known.
-5. A persistent, re-broadcast-aware mempool (transactions from a reorg
-   are already re-queued automatically; transactions from a dropped,
-   never-submitted work template are not).
-6. A light-client PoW verification mode (today every node holds the full
+   itself is encrypted and authenticated, so what's left here is finding
+   peers, not securing the link to ones already known.
+5. A light-client PoW verification mode (today every node holds the full
    epoch dataset in RAM).
-7. Legal counsel on regulatory classification before any solicitation of
+6. Legal counsel on regulatory classification before any solicitation of
    investors.

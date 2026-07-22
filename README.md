@@ -37,7 +37,7 @@ design, an independent cryptographic audit.
 - P2P transport is encrypted and mutually authenticated (Noise_XX), but
   there's still no peer discovery — a static seed list only.
 - No independent cryptographic audit of OndrisHash.
-- Minimal mempool (transactions displaced by a reorg are re-queued automatically; a stale, never-submitted work template still drops its transactions).
+- Mempool is persistent (survives a node restart) and transactions displaced by a reorg or a never-submitted work template are both automatically re-queued — but there's still no peer reputation/prioritization beyond FIFO.
 - "Full" PoW verification only (every node holds the entire epoch dataset in RAM); no light-client mode yet.
 - Fork/reorg handling assumes competing branches don't diverge across an epoch boundary (2,048 blocks) — see docs/ARCHITECTURE.md.
 

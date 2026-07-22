@@ -1,4 +1,5 @@
 use crate::block::Block;
+use crate::transaction::Transaction;
 use ondris_primitives::{Address, Hash256};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -30,6 +31,10 @@ pub struct ChainState {
     /// stored block regardless of whether it's canonical.
     chainwork: sled::Tree,
     meta: sled::Tree,
+    /// Pending transactions not yet included in an accepted block, keyed
+    /// by tx hash. Living in `sled` (not an in-memory `Vec`) means a node
+    /// restart doesn't lose them.
+    mempool: sled::Tree,
 }
 
 const TIP_KEY: &[u8] = b"tip";
@@ -43,7 +48,34 @@ impl ChainState {
             heights: db.open_tree("heights")?,
             chainwork: db.open_tree("chainwork")?,
             meta: db.open_tree("meta")?,
+            mempool: db.open_tree("mempool")?,
         })
+    }
+
+    /// Adds (or overwrites, if already present) a pending transaction.
+    pub fn mempool_insert(&self, tx: &Transaction) -> anyhow::Result<()> {
+        self.mempool.insert(tx.hash().0, serde_json::to_vec(tx)?)?;
+        Ok(())
+    }
+
+    /// Removes a transaction from the pending set — call this once (and
+    /// only once) the block containing it is actually accepted onto the
+    /// canonical chain. A transaction displaced by a reorg goes back in
+    /// via `mempool_insert`, not left removed.
+    pub fn mempool_remove(&self, tx_hash: &Hash256) -> anyhow::Result<()> {
+        self.mempool.remove(tx_hash.0)?;
+        Ok(())
+    }
+
+    /// All pending transactions, in no particular order. Read-only —
+    /// unlike the old in-memory design, calling this repeatedly (e.g. from
+    /// several `GET /work` requests) doesn't consume anything.
+    pub fn mempool_all(&self) -> anyhow::Result<Vec<Transaction>> {
+        self.mempool
+            .iter()
+            .values()
+            .map(|bytes| Ok(serde_json::from_slice(&bytes?)?))
+            .collect()
     }
 
     pub fn get_account(&self, addr: &Address) -> anyhow::Result<Account> {
@@ -158,6 +190,7 @@ impl ChainState {
         self.heights.flush()?;
         self.chainwork.flush()?;
         self.meta.flush()?;
+        self.mempool.flush()?;
         Ok(())
     }
 }

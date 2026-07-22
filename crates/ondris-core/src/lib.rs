@@ -69,6 +69,30 @@ mod integration_tests {
     }
 
     #[test]
+    fn mempool_survives_a_node_restart() {
+        let dir = TempDir::new("ondris-core-test-mempool-persist");
+        let sender = KeyPair::generate();
+        let mut tx = Transaction::new_unsigned(sender.public(), sender.address(), 1, 0, 0);
+        tx.sign(&sender);
+        let tx_hash = tx.hash();
+
+        {
+            let chain = Chain::open(dir.path(), test_genesis()).unwrap();
+            chain.state.mempool_insert(&tx).unwrap();
+            chain.state.flush().unwrap();
+            // `chain` drops here, simulating the node process exiting.
+        }
+
+        let reopened = Chain::open(dir.path(), test_genesis()).unwrap();
+        let pending = reopened.state.mempool_all().unwrap();
+        assert_eq!(pending.len(), 1, "the transaction must survive a restart");
+        assert_eq!(pending[0].hash(), tx_hash);
+
+        reopened.state.mempool_remove(&tx_hash).unwrap();
+        assert!(reopened.state.mempool_all().unwrap().is_empty());
+    }
+
+    #[test]
     fn genesis_initializes_tip_at_zero() {
         let dir = TempDir::new("ondris-core-test-genesis");
         let chain = Chain::open(dir.path(), test_genesis()).unwrap();
