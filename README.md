@@ -6,18 +6,17 @@ CPU miner and a command-line wallet.
 ## Mainnet launch: July 25, 2026
 
 This is a target launch date, not a guarantee of a finished audit. As of
-this writing, the items listed under "Known limitations" below (fork
-handling, independent cryptographic audit, GPU miner) are **not** complete.
-Anyone mining, holding, or building on Ondris before and around the mainnet
-date should treat it as early-stage, unaudited software and weigh that risk
+this writing, the items listed under "Known limitations" below
+(independent cryptographic audit, GPU miner) are **not** complete. Anyone
+mining, holding, or building on Ondris before and around the mainnet date
+should treat it as early-stage, unaudited software and weigh that risk
 accordingly.
 
 ## Status: experimental testnet, unaudited
 
 **Do not use with real value.** The Proof-of-Work algorithm (`OndrisHash`,
 see [docs/ALGORITHM.md](docs/ALGORITHM.md)) has not been reviewed by
-independent cryptographers. The node does not yet handle chain
-reorganizations (forks). The P2P transport is unencrypted. See
+independent cryptographers. The P2P transport is unencrypted. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full list of known
 limitations and remaining work before a serious mainnet launch.
 
@@ -35,11 +34,11 @@ layer discussed during design, an independent cryptographic audit.
 
 ## Known limitations (see docs/ARCHITECTURE.md for details)
 
-- No fork/reorg handling — only linear extension of the current tip is accepted.
 - P2P transport is unencrypted, no peer discovery (static seed list only).
 - No independent cryptographic audit of OndrisHash.
-- Minimal mempool (no re-queuing of transactions from a stale work template).
+- Minimal mempool (transactions displaced by a reorg are re-queued automatically; a stale, never-submitted work template still drops its transactions).
 - "Full" PoW verification only (every node holds the entire epoch dataset in RAM); no light-client mode yet.
+- Fork/reorg handling assumes competing branches don't diverge across an epoch boundary (2,048 blocks) — see docs/ARCHITECTURE.md.
 
 ## Requirements
 
@@ -101,8 +100,6 @@ cargo test --workspace
 - [docs/ALGORITHM.md](docs/ALGORITHM.md) — full spec of the PoW algorithm.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — architecture, technical choices, known limitations.
 - [docs/WHITEPAPER.md](docs/WHITEPAPER.md) — project overview.
-
-(Currently written in French; English translations are planned.)
 
 ## License
 

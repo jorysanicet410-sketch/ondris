@@ -1,11 +1,14 @@
 //! Minimal P2P network for Ondris: block/transaction gossip over TCP with
-//! length-prefixed JSON messages. No automatic peer discovery (DHT) in
-//! this first version: the peer list (seed nodes) is supplied via config
-//! at node startup. Documented as future work: peer discovery, chain
-//! fork/reorg handling, transport encryption (currently plaintext, fine
-//! for a testnet but not for a mainnet with real value at stake).
+//! length-prefixed JSON messages, plus a `GetBlock`/`BlockResponse` pair
+//! the node uses to fetch a missing parent when a block arrives out of
+//! order. No automatic peer discovery (DHT) in this first version: the
+//! peer list (seed nodes) is supplied via config at node startup.
+//! Documented as future work: peer discovery, transport encryption
+//! (currently plaintext, fine for a testnet but not for a mainnet with
+//! real value at stake).
 
 use ondris_core::{Block, Transaction};
+use ondris_primitives::Hash256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,6 +29,10 @@ pub enum Message {
     },
     NewBlock(Block),
     NewTransaction(Transaction),
+    /// Asks a peer for a block by hash — used to resolve orphans (a block
+    /// received before its parent).
+    GetBlock(Hash256),
+    BlockResponse(Option<Block>),
     Ping,
     Pong,
 }
@@ -36,6 +43,9 @@ pub enum NetworkEvent {
     PeerDisconnected(SocketAddr),
     NewBlock(Block),
     NewTransaction(Transaction),
+    /// A peer asked us for a block; `SocketAddr` is who to answer.
+    GetBlockRequest(SocketAddr, Hash256),
+    BlockResponse(Option<Block>),
 }
 
 type PeerMap = Arc<Mutex<HashMap<SocketAddr, mpsc::UnboundedSender<Message>>>>;
@@ -139,6 +149,14 @@ impl Network {
                     }
                     Message::NewTransaction(tx) => {
                         let _ = self.events_tx.send(NetworkEvent::NewTransaction(tx));
+                    }
+                    Message::GetBlock(hash) => {
+                        let _ = self
+                            .events_tx
+                            .send(NetworkEvent::GetBlockRequest(peer_addr, hash));
+                    }
+                    Message::BlockResponse(block) => {
+                        let _ = self.events_tx.send(NetworkEvent::BlockResponse(block));
                     }
                     Message::Ping => self.send_to(peer_addr, Message::Pong).await,
                     Message::Pong => {}

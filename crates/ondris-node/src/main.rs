@@ -1,7 +1,6 @@
 //! Ondris reference node: chain + P2P network + HTTP RPC API.
-//! Testnet only — see docs/ARCHITECTURE.md for known limitations (no fork
-//! handling, unencrypted P2P transport, minimal mempool with no
-//! re-queuing if a block is never submitted).
+//! Testnet only — see docs/ARCHITECTURE.md for known limitations
+//! (unencrypted P2P transport, static peer list only).
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -11,10 +10,12 @@ use axum::{Json, Router};
 use clap::Parser;
 use ondris_core::{
     AccountInfo, Block, Chain, ChainInfo, ErrorResponse, GenesisConfig, SubmitBlockResponse,
-    SubmitTxResponse, Transaction, WorkTemplate,
+    SubmitOutcome, SubmitTxResponse, Transaction, WorkTemplate,
 };
 use ondris_network::{Message, Network, NetworkEvent};
-use ondris_primitives::Address;
+use ondris_primitives::{Address, Hash256};
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,9 @@ struct AppState {
     chain: Chain,
     network: Network,
     mempool: Mutex<Vec<Transaction>>,
+    /// Blocks received before their parent, keyed by the parent hash
+    /// they're waiting on. Retried once that parent is accepted.
+    orphans: Mutex<HashMap<Hash256, Vec<Block>>>,
 }
 
 type SharedState = Arc<AppState>;
@@ -116,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         chain,
         network: network.clone(),
         mempool: Mutex::new(Vec::new()),
+        orphans: Mutex::new(HashMap::new()),
     });
 
     let event_state = state.clone();
@@ -123,15 +128,7 @@ async fn main() -> anyhow::Result<()> {
         while let Some(event) = events_rx.recv().await {
             match event {
                 NetworkEvent::NewBlock(block) => {
-                    let height = block.header.height;
-                    match event_state.chain.submit_block(block.clone()) {
-                        Ok(hash) => {
-                            tracing::info!("block {height} accepted from the network ({hash})");
-                            event_state.network.set_height(height);
-                            event_state.network.broadcast(Message::NewBlock(block)).await;
-                        }
-                        Err(e) => tracing::debug!("block received from the network rejected (likely already known or out of order): {e}"),
-                    }
+                    let _ = accept_and_broadcast(&event_state, block).await;
                 }
                 NetworkEvent::NewTransaction(tx) => {
                     if tx.is_signature_valid() {
@@ -142,6 +139,17 @@ async fn main() -> anyhow::Result<()> {
                             .await;
                     }
                 }
+                NetworkEvent::GetBlockRequest(peer_addr, hash) => {
+                    let block = event_state.chain.state.get_block(&hash).ok().flatten();
+                    event_state
+                        .network
+                        .send_to(peer_addr, Message::BlockResponse(block))
+                        .await;
+                }
+                NetworkEvent::BlockResponse(Some(block)) => {
+                    let _ = accept_and_broadcast(&event_state, block).await;
+                }
+                NetworkEvent::BlockResponse(None) => {}
                 NetworkEvent::PeerConnected(addr) => tracing::info!("peer connected: {addr}"),
                 NetworkEvent::PeerDisconnected(addr) => tracing::info!("peer disconnected: {addr}"),
             }
@@ -155,7 +163,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/work", get(get_work))
         .route("/block/submit", post(submit_block))
         .route("/tx/submit", post(submit_tx))
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(state);
 
     tracing::info!("RPC API listening on http://{}", args.rpc_addr);
@@ -163,6 +176,91 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Feeds one block through consensus and reacts to the outcome: broadcasts
+/// accepted/side-branch blocks, re-queues transactions that fell off a
+/// losing branch, and — if the block turns out to be an orphan — buffers
+/// it and asks peers for the missing parent. If accepting it unlocks any
+/// previously-buffered orphans (or a whole cascade of them), those are
+/// processed too. Returns the outcome for the block that was passed in
+/// specifically, not for any cascaded orphans.
+async fn accept_and_broadcast(state: &SharedState, block: Block) -> anyhow::Result<SubmitOutcome> {
+    let outcome = state.chain.submit_block(block.clone())?;
+    handle_outcome(state, &block, &outcome).await;
+
+    if let SubmitOutcome::Accepted { hash, .. } = &outcome {
+        let mut queue: VecDeque<Hash256> = VecDeque::new();
+        queue.push_back(*hash);
+        while let Some(h) = queue.pop_front() {
+            let waiting = state.orphans.lock().unwrap().remove(&h);
+            let Some(children) = waiting else { continue };
+            for child in children {
+                match state.chain.submit_block(child.clone()) {
+                    Ok(child_outcome) => {
+                        handle_outcome(state, &child, &child_outcome).await;
+                        if let SubmitOutcome::Accepted { hash: h2, .. } = child_outcome {
+                            queue.push_back(h2);
+                        }
+                    }
+                    Err(e) => tracing::debug!("rejected a buffered orphan block: {e}"),
+                }
+            }
+        }
+    }
+
+    Ok(outcome)
+}
+
+async fn handle_outcome(state: &SharedState, block: &Block, outcome: &SubmitOutcome) {
+    match outcome {
+        SubmitOutcome::Accepted {
+            hash,
+            height,
+            reorged,
+            requeue,
+        } => {
+            tracing::info!(
+                "block {height} accepted{} ({hash})",
+                if *reorged { " via reorg" } else { "" }
+            );
+            state.network.set_height(*height);
+            state
+                .network
+                .broadcast(Message::NewBlock(block.clone()))
+                .await;
+            if !requeue.is_empty() {
+                let mut mempool = state.mempool.lock().unwrap();
+                for tx in requeue {
+                    if !mempool.iter().any(|t| t.hash() == tx.hash()) {
+                        mempool.push(tx.clone());
+                    }
+                }
+            }
+        }
+        SubmitOutcome::SideBranch { height, .. } => {
+            tracing::debug!("block {height} stored as a side branch, tip unchanged");
+            state
+                .network
+                .broadcast(Message::NewBlock(block.clone()))
+                .await;
+        }
+        SubmitOutcome::AlreadyKnown => {}
+        SubmitOutcome::Orphan { missing_parent } => {
+            tracing::debug!("buffering orphan block, requesting parent {missing_parent}");
+            state
+                .orphans
+                .lock()
+                .unwrap()
+                .entry(*missing_parent)
+                .or_default()
+                .push(block.clone());
+            state
+                .network
+                .broadcast(Message::GetBlock(*missing_parent))
+                .await;
+        }
+    }
 }
 
 async fn chain_info(State(state): State<SharedState>) -> Result<Json<ChainInfo>, AppError> {
@@ -241,16 +339,19 @@ async fn submit_block(
     State(state): State<SharedState>,
     Json(block): Json<Block>,
 ) -> Result<Json<SubmitBlockResponse>, AppError> {
-    let height = block.header.height;
-    let hash = state.chain.submit_block(block)?;
-    state.network.set_height(height);
-    if let Some(stored) = state.chain.state.get_block(&hash)? {
-        state.network.broadcast(Message::NewBlock(stored)).await;
+    let outcome = accept_and_broadcast(&state, block).await?;
+    match outcome {
+        SubmitOutcome::Accepted { hash, height, .. }
+        | SubmitOutcome::SideBranch { hash, height } => Ok(Json(SubmitBlockResponse {
+            block_hash: hash,
+            height,
+        })),
+        SubmitOutcome::AlreadyKnown => Err(anyhow::anyhow!("block already known").into()),
+        SubmitOutcome::Orphan { missing_parent } => Err(anyhow::anyhow!(
+            "unknown parent block {missing_parent}; the node will try to fetch it from peers"
+        )
+        .into()),
     }
-    Ok(Json(SubmitBlockResponse {
-        block_hash: hash,
-        height,
-    }))
 }
 
 async fn submit_tx(

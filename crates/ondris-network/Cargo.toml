@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ondris-core = { path = "../ondris-core" }
+ondris-primitives = { path = "../ondris-primitives" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

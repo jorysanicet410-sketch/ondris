@@ -36,7 +36,7 @@ limitations and what remains before an audit.
 | CLI wallet | Functional |
 | Reference CPU miner | Functional |
 | GPU miner (OpenCL/CUDA) | Not started |
-| Fork/reorg handling | Not implemented |
+| Fork/reorg handling | Functional (see docs/ARCHITECTURE.md for known simplifications) |
 | Independent cryptographic audit | Not done |
 | "Useful compute" layer | Not implemented (research-grade) |
 

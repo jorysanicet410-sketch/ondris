@@ -1163,6 +1163,7 @@ version = "0.1.0-testnet"
 dependencies = [
  "anyhow",
  "ondris-core",
+ "ondris-primitives",
  "serde",
  "serde_json",
  "tokio",

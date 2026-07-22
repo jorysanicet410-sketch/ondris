@@ -51,20 +51,47 @@ The PoW dataset (tens of MB) is never transferred over the network.
 like an Ethash miner regenerates its DAG from a lightweight seed. Every
 node does the same to verify a received block.
 
+## Fork handling and reorgs
+
+`Chain::submit_block` accepts blocks that don't directly extend the
+current tip. Every stored block (canonical or not) carries its own
+cumulative chain work (`sum of block_work(difficulty)` back to genesis,
+tracked in the `chainwork` sled tree); a new block only becomes the tip if
+its cumulative work is strictly greater than the current tip's. When it
+is, `Chain::reconsider_tip` walks both chains back to their common
+ancestor, **simulates** the whole undo-then-reapply sequence against an
+in-memory account overlay first, and only writes to `sled` if every
+transaction on the winning branch actually checks out — a bad or
+conflicting branch can never leave the database half-updated. Transactions
+that were on the losing branch and aren't also on the winning one are
+handed back to the node so it can return them to its mempool.
+
+Blocks whose parent hasn't been seen yet come back as `SubmitOutcome::Orphan`
+instead of an error; `ondris-node` buffers them and asks peers for the
+missing parent (`Message::GetBlock` / `BlockResponse` in `ondris-network`),
+retrying the buffered block (and anything buffered on top of it) once the
+parent arrives.
+
+Known simplification: `dataset_for_height` resolves an epoch's dataset via
+the **canonical** height index, even when validating a side-branch block.
+This is correct as long as competing branches don't diverge before an
+epoch boundary (2,048 blocks) — true for the short races (two miners
+finding a block seconds apart) this fork-choice rule is meant to resolve.
+A branch that diverges earlier and still ends up winning would need
+per-branch epoch tracking, which isn't implemented.
+
 ## Known limitations (future work, not done yet)
 
-- **No fork/reorg handling**: `Chain::submit_block` only accepts a linear
-  extension of the current tip. If two miners find a block at the same
-  time, one of them will simply be rejected by the rest of the network
-  instead of triggering a real reorganization toward the heavier chain.
-  Needed before any testnet with multiple active miners at once.
 - **Minimal mempool**: `GET /work` drains the mempool on every call; if the
   resulting block is never submitted (miner crashes, restarts...), the
-  transactions it contained are lost and must be resent by the wallet. No
-  automatic re-queuing.
+  transactions it contained are lost until the wallet resends them.
+  Transactions displaced by a reorg *are* automatically re-queued (see
+  above), but there's still no persistent, re-broadcast-aware mempool.
 - **Unencrypted, unauthenticated P2P transport**: fine for a closed
   testnet, not for a public network with real value at stake.
-- **No peer discovery (DHT)**: static seed node list provided in config.
+- **No peer discovery (DHT)**: static seed node list provided in config;
+  orphan resolution broadcasts `GetBlock` to every connected peer rather
+  than targeting whoever is most likely to have it.
 - **"Full" PoW verification only**: every node keeps the full dataset for
   the current epoch in RAM. A "light client" mode (on-the-fly regeneration
   of only the needed indices from the cache) is not implemented.

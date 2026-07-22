@@ -13,7 +13,7 @@ pub mod state;
 pub mod transaction;
 
 pub use block::{merkle_root, Block};
-pub use chain::Chain;
+pub use chain::{block_work, Chain, SubmitOutcome};
 pub use difficulty::{next_difficulty, target_for_difficulty};
 pub use genesis::GenesisConfig;
 pub use header::BlockHeader;
@@ -26,7 +26,7 @@ pub use transaction::Transaction;
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use ondris_primitives::KeyPair;
+    use ondris_primitives::{Address, Hash256, KeyPair};
     use tempfile_shim::TempDir;
 
     mod tempfile_shim {
@@ -95,7 +95,20 @@ mod integration_tests {
             block.header.nonce += 1;
         }
 
-        let hash = chain.submit_block(block).unwrap();
+        let outcome = chain.submit_block(block).unwrap();
+        let hash = match outcome {
+            SubmitOutcome::Accepted {
+                hash,
+                height,
+                reorged,
+                ..
+            } => {
+                assert_eq!(height, 1);
+                assert!(!reorged, "extending an empty chain isn't a reorg");
+                hash
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        };
         let (height, tip_hash) = chain.state.tip().unwrap().unwrap();
         assert_eq!(height, 1);
         assert_eq!(tip_hash, hash);
@@ -104,14 +117,155 @@ mod integration_tests {
         assert_eq!(account.balance, chain.block_reward(1));
     }
 
+    /// Mines a valid child of `prev_hash` at `height` with a fixed
+    /// difficulty, for constructing competing branches in tests.
+    fn mine_child(
+        chain: &Chain,
+        prev_hash: Hash256,
+        height: u64,
+        difficulty: u64,
+        miner: Address,
+    ) -> Block {
+        let dataset = chain.dataset_for_height(height).unwrap();
+        let header = BlockHeader {
+            height,
+            prev_hash,
+            tx_root: merkle_root(&[]),
+            timestamp: chain::now_secs(),
+            difficulty,
+            miner,
+            nonce: 0,
+        };
+        let mut block = Block {
+            header,
+            transactions: vec![],
+        };
+        let target = target_for_difficulty(difficulty);
+        loop {
+            let hash = block.header.id(&dataset);
+            if ondris_pow::meets_target(&hash, &target) {
+                return block;
+            }
+            block.header.nonce += 1;
+        }
+    }
+
     #[test]
-    fn rejects_block_with_wrong_prev_hash() {
-        let dir = TempDir::new("ondris-core-test-reject");
+    fn unknown_parent_is_reported_as_orphan_not_an_error() {
+        let dir = TempDir::new("ondris-core-test-orphan");
         let chain = Chain::open(dir.path(), test_genesis()).unwrap();
         let miner_addr = KeyPair::generate().address();
-        let (mut block, _dataset) = chain.work_template(miner_addr, vec![]).unwrap();
-        block.header.prev_hash = ondris_primitives::Hash256::hash(b"not the right prev_hash");
-        let result = chain.submit_block(block);
-        assert!(result.is_err());
+        let difficulty = chain.compute_next_difficulty(1).unwrap();
+        let missing = Hash256::hash(b"a parent we never stored");
+        // Mine a genuinely valid block ON TOP of the missing parent —
+        // prev_hash is part of what gets hashed, so it has to be present
+        // from the start rather than swapped in after mining.
+        let block = mine_child(&chain, missing, 1, difficulty, miner_addr);
+
+        let outcome = chain.submit_block(block).unwrap();
+        match outcome {
+            SubmitOutcome::Orphan { missing_parent } => assert_eq!(missing_parent, missing),
+            other => panic!("expected Orphan, got {other:?}"),
+        }
+        // An orphan must never move the tip.
+        let (height, _) = chain.state.tip().unwrap().unwrap();
+        assert_eq!(height, 0);
+    }
+
+    #[test]
+    fn equal_work_side_branch_does_not_move_the_tip() {
+        let dir = TempDir::new("ondris-core-test-sidebranch");
+        let chain = Chain::open(dir.path(), test_genesis()).unwrap();
+        let (_, genesis_hash) = chain.state.tip().unwrap().unwrap();
+        let miner_a = KeyPair::generate().address();
+        let miner_b = KeyPair::generate().address();
+        let difficulty = chain.compute_next_difficulty(1).unwrap();
+
+        let a1 = mine_child(&chain, genesis_hash, 1, difficulty, miner_a);
+        let a1_outcome = chain.submit_block(a1).unwrap();
+        let a1_hash = match a1_outcome {
+            SubmitOutcome::Accepted { hash, .. } => hash,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+
+        let b1 = mine_child(&chain, genesis_hash, 1, difficulty, miner_b);
+        let b1_outcome = chain.submit_block(b1).unwrap();
+        assert!(
+            matches!(b1_outcome, SubmitOutcome::SideBranch { .. }),
+            "equal work must not win: {b1_outcome:?}"
+        );
+
+        let (height, tip_hash) = chain.state.tip().unwrap().unwrap();
+        assert_eq!(height, 1);
+        assert_eq!(
+            tip_hash, a1_hash,
+            "first-seen branch should still be the tip on a tie"
+        );
+    }
+
+    #[test]
+    fn heavier_branch_triggers_a_reorg_and_rolls_back_the_loser() {
+        let dir = TempDir::new("ondris-core-test-reorg");
+        let chain = Chain::open(dir.path(), test_genesis()).unwrap();
+        let (_, genesis_hash) = chain.state.tip().unwrap().unwrap();
+        let miner_a = KeyPair::generate().address();
+        let miner_b = KeyPair::generate().address();
+        let d1 = chain.compute_next_difficulty(1).unwrap();
+
+        // Branch A: genesis -> A1 (one block of work).
+        let a1 = mine_child(&chain, genesis_hash, 1, d1, miner_a);
+        match chain.submit_block(a1).unwrap() {
+            SubmitOutcome::Accepted {
+                height, reorged, ..
+            } => {
+                assert_eq!(height, 1);
+                assert!(!reorged);
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+        assert_eq!(
+            chain.state.get_account(&miner_a).unwrap().balance,
+            chain.block_reward(1)
+        );
+
+        // Branch B: genesis -> B1 -> B2 (two blocks of work — heavier than A).
+        let b1 = mine_child(&chain, genesis_hash, 1, d1, miner_b);
+        let b1_hash = match chain.submit_block(b1.clone()).unwrap() {
+            SubmitOutcome::SideBranch { hash, .. } => hash,
+            other => panic!("expected SideBranch, got {other:?}"),
+        };
+        // Tip hasn't moved yet: still branch A's block, miner_a still credited.
+        assert_eq!(
+            chain.state.get_account(&miner_a).unwrap().balance,
+            chain.block_reward(1)
+        );
+
+        let b2 = mine_child(&chain, b1_hash, 2, d1, miner_b);
+        match chain.submit_block(b2).unwrap() {
+            SubmitOutcome::Accepted {
+                height,
+                reorged,
+                requeue,
+                ..
+            } => {
+                assert_eq!(height, 2);
+                assert!(reorged, "B2 should have reorganized the chain away from A1");
+                assert!(
+                    requeue.is_empty(),
+                    "neither branch had any transactions here"
+                );
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+
+        let (height, _) = chain.state.tip().unwrap().unwrap();
+        assert_eq!(height, 2);
+        // A1's reward must be rolled back...
+        assert_eq!(chain.state.get_account(&miner_a).unwrap().balance, 0);
+        // ...and miner_b must be credited for both B1 and B2.
+        assert_eq!(
+            chain.state.get_account(&miner_b).unwrap().balance,
+            chain.block_reward(1) + chain.block_reward(2)
+        );
     }
 }
