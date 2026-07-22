@@ -90,6 +90,11 @@ impl Dataset {
         self.bytes.len()
     }
 
+    /// Raw dataset bytes — e.g. for uploading the dataset to a GPU buffer.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     fn item(&self, idx: u64) -> &[u8] {
         let n_items = (self.bytes.len() / ITEM_SIZE) as u64;
         let idx = (idx % n_items) as usize;

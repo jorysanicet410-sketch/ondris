@@ -6,11 +6,10 @@ CPU miner and a command-line wallet.
 ## Mainnet launch: July 25, 2026
 
 This is a target launch date, not a guarantee of a finished audit. As of
-this writing, the items listed under "Known limitations" below
-(independent cryptographic audit, GPU miner) are **not** complete. Anyone
-mining, holding, or building on Ondris before and around the mainnet date
-should treat it as early-stage, unaudited software and weigh that risk
-accordingly.
+this writing, independent cryptographic audit listed under "Known
+limitations" below is **not** complete. Anyone mining, holding, or
+building on Ondris before and around the mainnet date should treat it as
+early-stage, unaudited software and weigh that risk accordingly.
 
 ## Status: experimental testnet, unaudited
 
@@ -27,10 +26,11 @@ limitations and remaining work before a serious mainnet launch.
 - `ondris-network` — basic TCP P2P gossip.
 - `ondris-node` — full daemon: chain + network + HTTP RPC API.
 - `ondris-miner` — reference CPU miner (multi-threaded).
+- `ondris-miner-gpu` — OpenCL GPU miner. Its kernel is a mechanical translation of a Rust reference chain (BLAKE3 → xoshiro256\*\* → the full mixing algorithm) that's unit-tested against the real `blake3`/`rand_xoshiro` crates first, then checked bit-for-bit against `ondris_pow::ondris_hash` on real hardware via `ondris-miner-gpu self-test` — run that before mining on any new GPU/driver. Correctness-validated on an RTX 4070 Super; raw throughput is not yet optimized (see docs/ARCHITECTURE.md).
 - `ondris-wallet` — CLI wallet with encrypted keystore (Argon2 + AES-256-GCM).
 
-What **does not exist yet**: a GPU miner (OpenCL/CUDA), the "useful compute"
-layer discussed during design, an independent cryptographic audit.
+What **does not exist yet**: the "useful compute" layer discussed during
+design, an independent cryptographic audit.
 
 ## Known limitations (see docs/ARCHITECTURE.md for details)
 
@@ -76,6 +76,32 @@ cargo run --release --bin ondris-miner -- \
   --address <address-shown-by-the-wallet> \
   --threads 4
 ```
+
+## Mine on a GPU (OpenCL)
+
+Requires an OpenCL-capable GPU (NVIDIA, AMD) and its drivers. Run the
+self-test first, on any new GPU or driver version, before trusting it to
+mine for real:
+
+```bash
+cargo run --release --bin ondris-miner-gpu -- self-test
+```
+
+That checks the kernel's output against the CPU reference implementation
+at both tiny and full-size parameters — it should print `ALL CHECKS
+PASSED`. Then:
+
+```bash
+cargo run --release --bin ondris-miner-gpu -- mine \
+  --node http://127.0.0.1:8080 \
+  --address <address-shown-by-the-wallet> \
+  --batch-size 512
+```
+
+`--batch-size` is nonces tried per kernel launch; each one needs its own
+`SCRATCHPAD_SIZE`-byte slice of a single GPU buffer, so raising it is
+bounded by both total VRAM and the driver's max single-allocation size
+(which is often well under total VRAM).
 
 ## Send a transaction
 

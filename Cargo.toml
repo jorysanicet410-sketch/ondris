@@ -8,6 +8,7 @@ members = [
     "crates/ondris-wallet",
     "crates/ondris-node",
     "crates/ondris-miner",
+    "crates/ondris-miner-gpu",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ aes-gcm = "0.10"
 hex = "0.4"
 rayon = "1.10"
 rpassword = "7"
+opencl3 = "0.9"
 
 [profile.release]
 opt-level = 3

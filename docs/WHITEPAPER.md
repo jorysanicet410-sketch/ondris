@@ -35,7 +35,7 @@ limitations and what remains before an audit.
 | Node (chain + P2P network + RPC) | Functional, testnet only |
 | CLI wallet | Functional |
 | Reference CPU miner | Functional |
-| GPU miner (OpenCL/CUDA) | Not started |
+| GPU miner (OpenCL) | Functional, correctness-validated on real hardware (RTX 4070 Super); throughput not yet optimized |
 | Fork/reorg handling | Functional (see docs/ARCHITECTURE.md for known simplifications) |
 | Independent cryptographic audit | Not done |
 | "Useful compute" layer | Not implemented (research-grade) |
