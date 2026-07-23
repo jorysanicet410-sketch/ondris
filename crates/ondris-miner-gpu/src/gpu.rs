@@ -169,13 +169,21 @@ impl Gpu {
             result_nonce,
             result_found,
             kernel,
+            cached_header: None,
+            cached_target: None,
         })
     }
 }
 
-/// Holds the buffer that stays constant across many kernel launches
-/// mining the same epoch: the dataset. Header, nonce base, batch size and
-/// target all change per launch and are cheap to pass fresh each time.
+/// Holds the buffers that stay constant across many kernel launches
+/// mining the same block: the dataset (whole epoch), and — this is the
+/// part that used to be rebuilt and re-uploaded on *every single batch*
+/// even though `mine_block_gpu`'s loop only ever varies `nonce_base` —
+/// the header and target too. Re-uploading two tiny buffers per batch
+/// sounds cheap, but at ~5ms/batch on a fast GPU it's a host round-trip
+/// competing with the actual mining work for a slice of every batch;
+/// caching them turns that into one upload per block instead of one per
+/// batch (tens of thousands of times cheaper in practice).
 pub struct MiningSession<'a> {
     gpu: &'a Gpu,
     dataset_buf: Buffer<u8>,
@@ -183,6 +191,8 @@ pub struct MiningSession<'a> {
     result_nonce: Buffer<u8>,
     result_found: Buffer<u8>,
     kernel: Kernel,
+    cached_header: Option<(Vec<u8>, Buffer<u8>)>,
+    cached_target: Option<([u8; 32], Buffer<u8>)>,
 }
 
 impl MiningSession<'_> {
@@ -201,34 +211,52 @@ impl MiningSession<'_> {
             "header too long for the kernel's fixed input buffer"
         );
 
-        let header_buf = self.gpu.buffer_ro(header_bytes)?;
-        let target_buf = self.gpu.buffer_ro(target)?;
+        if self.cached_header.as_ref().map(|(h, _)| h.as_slice()) != Some(header_bytes) {
+            let buf = self.gpu.buffer_ro(header_bytes)?;
+            self.cached_header = Some((header_bytes.to_vec(), buf));
+        }
+        if self.cached_target.as_ref().map(|(t, _)| t) != Some(target) {
+            let buf = self.gpu.buffer_ro(target)?;
+            self.cached_target = Some((*target, buf));
+        }
+        let header_buf = &self.cached_header.as_ref().unwrap().1;
+        let target_buf = &self.cached_target.as_ref().unwrap().1;
 
+        // Non-blocking: this only tells the host call to return
+        // immediately, not the device to reorder anything. The queue is
+        // in-order (no CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE), so the
+        // kernel launched right after is still guaranteed to see this
+        // write completed first -- we just stop paying a host-side wait
+        // for a transfer whose completion we don't need to observe yet.
         unsafe {
             self.gpu.queue.enqueue_write_buffer(
                 &mut self.result_found,
-                CL_BLOCKING,
+                CL_NON_BLOCKING,
                 0,
                 &0i32.to_le_bytes(),
                 &[],
             )?;
         }
 
-        let event = unsafe {
+        unsafe {
             ExecuteKernel::new(&self.kernel)
                 .set_arg(&self.dataset_buf)
                 .set_arg(&self.dataset_len)
-                .set_arg(&header_buf)
+                .set_arg(header_buf)
                 .set_arg(&(header_bytes.len() as u32))
                 .set_arg(&(nonce_base as cl_ulong))
                 .set_arg(&accesses)
-                .set_arg(&target_buf)
+                .set_arg(target_buf)
                 .set_arg(&self.result_nonce)
                 .set_arg(&self.result_found)
                 .set_global_work_size(batch_size)
                 .enqueue_nd_range(&self.gpu.queue)?
         };
-        event.wait()?;
+        // No explicit wait here: the blocking read below is ordered after
+        // the kernel on this same in-order queue, so waiting for the read
+        // to complete already waits for the kernel too. Removes one full
+        // host-GPU round trip per batch compared to waiting on the kernel
+        // event and *then* separately enqueuing and waiting on the read.
 
         let mut found_bytes = [0u8; 4];
         unsafe {
@@ -239,8 +267,7 @@ impl MiningSession<'_> {
                 &mut found_bytes,
                 &[],
             )?
-        }
-        .wait()?;
+        };
         let found = cl_int::from_le_bytes(found_bytes);
 
         if found != 0 {
@@ -253,8 +280,7 @@ impl MiningSession<'_> {
                     &mut nonce_bytes,
                     &[],
                 )?
-            }
-            .wait()?;
+            };
             Ok(Some(u64::from_le_bytes(nonce_bytes)))
         } else {
             Ok(None)

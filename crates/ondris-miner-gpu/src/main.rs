@@ -43,8 +43,14 @@ enum Command {
         /// shared read-only across every work-item), so this can be much
         /// larger than a scratchpad-mixing design would allow — bounded
         /// mainly by how long you're willing to wait between result
-        /// checks, not by VRAM.
-        #[arg(long, default_value_t = 65536)]
+        /// checks, not by VRAM. 1,048,576 measured at ~98% of this
+        /// kernel's throughput ceiling on an RTX 4070 Super (~16.6M H/s
+        /// of a ~16.8M H/s ceiling) while still checking in every ~60ms;
+        /// smaller batches (the old 65536 default) leave real throughput
+        /// on the table (~11.9M H/s) because too few work-items in flight
+        /// can't hide this kernel's memory latency across all compute
+        /// units — see `benchmark` to re-check on your own GPU.
+        #[arg(long, default_value_t = 1_048_576)]
         batch_size: usize,
     },
     /// Measures raw H/s at a fixed batch size, with no dependency on
@@ -52,7 +58,7 @@ enum Command {
     /// variance (a block might complete after 1 batch or 20) to read
     /// throughput off of directly.
     Benchmark {
-        #[arg(long, default_value_t = 65536)]
+        #[arg(long, default_value_t = 1_048_576)]
         batch_size: usize,
         /// How many kernel launches to time and average over.
         #[arg(long, default_value_t = 20)]

@@ -29,17 +29,18 @@ a compute-bound workload, and compute-bound workloads don't play to a
 GPU's actual strength (memory bandwidth) — so it was fixed by changing the
 algorithm, not by tuning the GPU kernel further.
 
-v2's real-hardware benchmark on the same GPU: **~12.9 million H/s** — a
-~172,000x jump from v1's GPU throughput. v2 is also far cheaper for a CPU
-to compute than v1 was (64 dataset touches instead of 500,000+ sequential
-hashes): a 4-thread CPU miner running v2 does ~750,000 H/s on the same
-machine, so the honest GPU-vs-CPU comparison **on the new algorithm** is
-~13M vs ~750K H/s — a **~17x GPU advantage**, not the CPU-favoring
-regression v1 had, but also nowhere near as dramatic-sounding as
-comparing v2's GPU number against v1's CPU number would be (a comparison
-this document deliberately avoids making). This is a breaking,
-consensus-level change — v1 and v2 chains are entirely incompatible with
-each other.
+v2's real-hardware benchmark on the same GPU, after also tuning the
+kernel's batch size to where throughput actually plateaus (see
+docs/ARCHITECTURE.md): **~16.6 million H/s** — a ~221,000x jump from v1's
+GPU throughput. v2 is also far cheaper for a CPU to compute than v1 was
+(64 dataset touches instead of 500,000+ sequential hashes): a 4-thread
+CPU miner running v2 does ~750,000 H/s on the same machine, so the honest
+GPU-vs-CPU comparison **on the new algorithm** is ~16.6M vs ~750K H/s — a
+**~22x GPU advantage**, not the CPU-favoring regression v1 had, but also
+nowhere near as dramatic-sounding as comparing v2's GPU number against
+v1's CPU number would be (a comparison this document deliberately avoids
+making). This is a breaking, consensus-level change — v1 and v2 chains
+are entirely incompatible with each other.
 
 ## Design goals
 
@@ -157,9 +158,12 @@ calls per verification, down from hundreds of thousands.
 
 ## What is NOT done yet (future work, not to be presented as delivered)
 
-- **Real-hardware GPU throughput validated** (~13M H/s on an RTX 4070
-  Super) but not yet tuned further — occupancy, work-group sizing, and
-  larger batch sizes haven't been explored past the first working design.
+- **Real-hardware GPU throughput validated and batch-size-tuned** (~16.6M
+  H/s on an RTX 4070 Super, ~98% of this kernel's measured ~16.8M H/s
+  ceiling on that GPU) — see docs/ARCHITECTURE.md for how the original
+  65,536-nonce default batch size was leaving throughput on the table.
+  Occupancy/work-group sizing beyond batch size, and a native CUDA path,
+  are still unexplored.
 - **CUDA-specific kernel**: only an OpenCL kernel exists; it runs on
   NVIDIA hardware via NVIDIA's OpenCL implementation, but a native CUDA
   path (or AMD-specific tuning) hasn't been written or benchmarked.

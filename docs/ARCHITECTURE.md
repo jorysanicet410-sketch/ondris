@@ -160,10 +160,12 @@ its own either — every nonce the kernel flags gets re-hashed on the CPU
 with the real reference function before it's ever submitted to a node.
 
 Current status: correctness-validated this way on an NVIDIA RTX 4070
-Super, and now genuinely GPU-scale on the same hardware: **~12.9 million
-H/s** (`benchmark --batch-size 262144 --batches 15`). The apples-to-apples
+Super, and now genuinely GPU-scale on the same hardware: **~16.6 million
+H/s** (`benchmark --batch-size 1048576 --batches 20`), about 98% of this
+kernel's measured throughput ceiling on that GPU (~16.8M H/s, seen at
+batch sizes from ~4M up to 16M with no further gain). The apples-to-apples
 comparison is against a 4-thread CPU miner running the *same* (v2)
-algorithm on the same machine, which does ~750,000 H/s — a **~17x GPU
+algorithm on the same machine, which does ~750,000 H/s — a **~22x GPU
 advantage**. This result only exists because of an algorithm redesign,
 not kernel tuning: the original algorithm (see `docs/ALGORITHM.md`'s
 revision history) used a CryptoNight/RandomX-style scratchpad mixed over
@@ -183,9 +185,24 @@ good at, and which also made the algorithm far cheaper to compute on a
 CPU (64 dataset touches vs. 500,000+ sequential hashes), so v2's CPU
 miner is itself roughly 5,500x faster than v1's was.
 
-Not yet done: further occupancy/work-group tuning past this first working
-design, and a native CUDA path (the current kernel runs on NVIDIA
-hardware via NVIDIA's OpenCL implementation, not CUDA directly).
+**Batch size matters a lot more than it first looked.** The `mine`
+subcommand's original default (65,536 nonces per kernel launch) only
+reached ~11.9M H/s — leaving ~30% of this GPU's real throughput unused,
+not because of host-side overhead (a first attempt cached the per-batch
+header/target buffer uploads, which turned out to change throughput by
+under 1%) but because too few work-items in flight can't hide this
+kernel's per-thread memory latency across all 56 compute units. Batch
+size has no upper bound tied to VRAM here (there's no per-thread
+scratchpad to allocate, unlike the old design), so it was raised until
+throughput stopped improving — measured, not guessed, exactly like the
+v1→v2 algorithm diagnosis. The new default is 1,048,576: near-ceiling
+throughput while still checking in roughly every 60ms, versus 250ms–1s
+checks at 4M–16M for no meaningful additional throughput. Run `benchmark`
+yourself to find the right value for a different GPU.
+
+Not yet done: further occupancy/work-group tuning beyond batch size, and
+a native CUDA path (the current kernel runs on NVIDIA hardware via
+NVIDIA's OpenCL implementation, not CUDA directly).
 
 ## Mempool persistence
 
@@ -217,10 +234,10 @@ mempool clears.
 
 ## Known limitations (future work, not done yet)
 
-- **GPU miner further tuning**: correctness-validated and already
-  GPU-scale (~13M H/s on an RTX 4070 Super, see "The GPU miner" above),
-  but occupancy/work-group sizing and a native CUDA path haven't been
-  explored past the first working design.
+- **GPU miner further tuning**: correctness-validated and batch-size-tuned
+  to ~98% of its measured ceiling (~16.6M H/s on an RTX 4070 Super, see
+  "The GPU miner" above), but occupancy/work-group sizing beyond batch
+  size and a native CUDA path haven't been explored.
 - **No peer discovery (DHT)**: static seed node list provided in config;
   orphan resolution broadcasts `GetBlock` to every connected peer rather
   than targeting whoever is most likely to have it. The transport itself

@@ -26,7 +26,7 @@ limitations and remaining work before a serious mainnet launch.
 - `ondris-network` — TCP P2P gossip, wrapped in a Noise_XX-encrypted, mutually-authenticated transport (see docs/ARCHITECTURE.md) — no peer discovery yet, static seed list only.
 - `ondris-node` — full daemon: chain + network + HTTP RPC API.
 - `ondris-miner` — reference CPU miner (multi-threaded).
-- `ondris-miner-gpu` — OpenCL GPU miner. Its kernel is a mechanical translation of a Rust reference chain (BLAKE3 → the FNV dataset-mixing algorithm) that's unit-tested against the real `blake3` crate first, then checked bit-for-bit against `ondris_pow::ondris_hash` on real hardware via `ondris-miner-gpu self-test` — run that before mining on any new GPU/driver. Correctness-validated on an RTX 4070 Super at ~13,000,000 H/s — see docs/ARCHITECTURE.md for how that compares to the CPU miner and the algorithm redesign that got it there.
+- `ondris-miner-gpu` — OpenCL GPU miner. Its kernel is a mechanical translation of a Rust reference chain (BLAKE3 → the FNV dataset-mixing algorithm) that's unit-tested against the real `blake3` crate first, then checked bit-for-bit against `ondris_pow::ondris_hash` on real hardware via `ondris-miner-gpu self-test` — run that before mining on any new GPU/driver. Correctness-validated on an RTX 4070 Super at ~16,600,000 H/s (~98% of its measured ceiling on that GPU) — see docs/ARCHITECTURE.md for how that compares to the CPU miner, the algorithm redesign that got it there, and why batch size matters as much as it does.
 - `ondris-wallet` — CLI wallet with encrypted keystore (Argon2 + AES-256-GCM).
 
 What **does not exist yet**: the "useful compute" layer discussed during
@@ -95,16 +95,20 @@ PASSED`. Then:
 ```bash
 cargo run --release --bin ondris-miner-gpu -- mine \
   --node http://127.0.0.1:8080 \
-  --address <address-shown-by-the-wallet> \
-  --batch-size 65536
+  --address <address-shown-by-the-wallet>
 ```
 
-`--batch-size` is nonces tried per kernel launch. The per-epoch dataset
-(the only large buffer this algorithm needs) is uploaded once and shared
-read-only across every work-item, so batch size is no longer bounded by a
-per-nonce private allocation the way the original scratchpad-based design
-was — 65536 is a reasonable default; raise it further if the benchmark
-subcommand shows headroom on your GPU.
+`--batch-size` (nonces tried per kernel launch) defaults to 1,048,576.
+The per-epoch dataset (the only large buffer this algorithm needs) is
+uploaded once and shared read-only across every work-item, so batch size
+isn't bounded by a per-nonce private allocation the way the original
+scratchpad-based design was — it's bounded by how long you're willing to
+wait between result checks. Too small a batch leaves real throughput
+unused (a much smaller batch measured barely 70% of this GPU's ceiling,
+not because of per-batch overhead but because too few work-items in
+flight can't hide this kernel's memory latency across all compute units)
+— run the `benchmark` subcommand at a few sizes to find where it plateaus
+on your own GPU.
 
 ## Send a transaction
 

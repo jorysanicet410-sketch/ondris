@@ -4,4 +4,5 @@ Cargo.lock.bak
 *.log
 ondris-data/
 *.ondris-wallet.json
+my-wallet.json
 .DS_Store

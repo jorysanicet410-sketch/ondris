@@ -332,7 +332,7 @@ footer{ border-top:1px solid var(--wire); }
       <a class="btn solid" href="https://github.com/ondris-project/ondris" target="_blank" rel="noopener">Read the source →</a>
       <a class="btn ghost" href="#get-started">Run a node</a>
     </div>
-    <p class="hero-meta">Mainnet target — <strong>25 July 2026</strong>. The algorithm, node, wallet, fork handling and both miners (CPU and GPU) work today; the GPU miner measures ~13M H/s on an RTX 4070 Super, and the independent audit doesn't exist. See exactly what's done in <a href="#status" style="color:var(--text);border-bottom:1px solid var(--wire-strong);text-decoration:none;">Status</a> before you point real hardware at it.</p>
+    <p class="hero-meta">Mainnet target — <strong>25 July 2026</strong>. The algorithm, node, wallet, fork handling and both miners (CPU and GPU) work today; the GPU miner measures ~16.6M H/s on an RTX 4070 Super, and the independent audit doesn't exist. See exactly what's done in <a href="#status" style="color:var(--text);border-bottom:1px solid var(--wire-strong);text-decoration:none;">Status</a> before you point real hardware at it.</p>
   </div>
   <div class="stat-strip">
     <div class="stat"><span class="stat-label"><span class="live-dot" id="liveDot"></span>Chain height</span><span class="stat-value is-loading" id="statHeight">—</span></div>
@@ -413,7 +413,7 @@ footer{ border-top:1px solid var(--wire); }
           <tr><td>Node — chain + P2P + RPC</td><td><span class="pill good">Functional, testnet only</span></td></tr>
           <tr><td>CLI wallet</td><td><span class="pill good">Functional</span></td></tr>
           <tr><td>Reference CPU miner</td><td><span class="pill good">Functional</span></td></tr>
-          <tr><td>GPU miner — OpenCL</td><td><span class="pill good">Functional, ~12.9M H/s on an RTX 4070 Super (~17x the CPU miner on the same machine)</span></td></tr>
+          <tr><td>GPU miner — OpenCL</td><td><span class="pill good">Functional, ~16.6M H/s on an RTX 4070 Super (~22x the CPU miner on the same machine)</span></td></tr>
           <tr><td>Fork / reorg handling</td><td><span class="pill good">Functional</span></td></tr>
           <tr><td>Independent cryptographic audit</td><td><span class="pill warn">Not done</span></td></tr>
           <tr><td>"Useful compute" layer</td><td><span class="pill off">Research-grade, not implemented</span></td></tr>
@@ -442,7 +442,7 @@ footer{ border-top:1px solid var(--wire); }
 <span class="c-prompt">$ </span><span class="c-cmd">cargo run --release --bin ondris-miner</span> <span class="c-flag">--</span> <span class="c-flag">--node</span> http://127.0.0.1:8080 <span class="c-flag">--address</span> &lt;your-address&gt; <span class="c-flag">--threads</span> 4</code></pre>
       </div>
       <div class="getstarted-note">
-        <p class="prose mute" style="margin-bottom:1.1rem;">Needs Rust (edition 2021, 1.96+). The commands above build every binary, join the public testnet seed, create a wallet with an encrypted keystore, and start mining with all available CPU threads. There's also an OpenCL GPU miner (<code>ondris-miner-gpu</code>) — run its <code>self-test</code> subcommand before pointing it at real hardware; it's correctness-validated and measures ~13M H/s on an RTX 4070 Super.</p>
+        <p class="prose mute" style="margin-bottom:1.1rem;">Needs Rust (edition 2021, 1.96+). The commands above build every binary, join the public testnet seed, create a wallet with an encrypted keystore, and start mining with all available CPU threads. There's also an OpenCL GPU miner (<code>ondris-miner-gpu</code>) — run its <code>self-test</code> subcommand before pointing it at real hardware; it's correctness-validated and measures ~16.6M H/s on an RTX 4070 Super, ~98% of its measured ceiling on that GPU.</p>
         <p class="prose mute">Full walkthrough, RPC reference, and known limitations are in the <a href="https://github.com/ondris-project/ondris#readme" target="_blank" rel="noopener">README</a> and <a href="https://github.com/ondris-project/ondris/blob/master/docs/ARCHITECTURE.md" target="_blank" rel="noopener">architecture notes</a>.</p>
       </div>
     </div>
